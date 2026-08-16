@@ -1,0 +1,158 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>外贸单证 Agent Demo</title>
+    <link rel="stylesheet" href="./styles.css" />
+  </head>
+  <body>
+    <main class="shell">
+      <header class="topbar">
+        <div>
+          <h1>外贸单证 Agent</h1>
+        </div>
+        <div class="status-pill" id="serverStatus">准备中</div>
+      </header>
+
+      <section class="workspace">
+        <aside class="panel source-panel">
+          <div class="panel-head">
+            <h2>资料</h2>
+            <button class="icon-button" id="refreshCases" title="刷新资料目录" aria-label="刷新资料目录">↻</button>
+          </div>
+          <label class="input-label" for="folderInput">资料目录</label>
+          <div class="path-row">
+            <input id="folderInput" type="text" />
+            <button id="scanButton">扫描</button>
+          </div>
+          <div class="case-list" id="caseList"></div>
+
+          <h3>文件分类</h3>
+          <div class="file-list" id="fileList"></div>
+        </aside>
+
+        <section class="panel review-panel">
+          <div class="panel-head">
+            <h2>核验</h2>
+            <div class="button-group">
+              <button id="validateButton">校验</button>
+              <div class="export-menu-wrap">
+                <button id="exportButton" class="primary" type="button">导出</button>
+                <div class="export-menu" id="exportMenu" hidden>
+                  <button type="button" data-export-kind="pipkg">导出 PIPKG</button>
+                  <button type="button" data-export-kind="si">导出 SI</button>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <div class="summary-grid" id="caseSummary"></div>
+
+          <div class="tabs" role="tablist">
+            <button class="tab" data-tab="groups">拆单</button>
+            <button class="tab active" data-tab="fields">基础信息</button>
+            <button class="tab" data-tab="si">SI</button>
+            <button class="tab" data-tab="items">PI</button>
+            <button class="tab" data-tab="packing">PKG</button>
+            <button class="tab" data-tab="calc">计算</button>
+            <button class="tab" data-tab="import">整理稿导入</button>
+            <button class="tab" data-tab="skills">Skills</button>
+          </div>
+
+          <div class="tab-panel active" id="tab-fields">
+            <div class="field-grid" id="fieldGrid"></div>
+          </div>
+
+          <div class="tab-panel" id="tab-groups">
+            <div class="group-list" id="groupList"></div>
+          </div>
+
+          <div class="tab-panel" id="tab-si">
+            <div class="field-grid" id="siGrid"></div>
+          </div>
+
+          <div class="tab-panel" id="tab-items">
+            <div class="table-wrap">
+              <table id="itemsTable">
+                <thead>
+                  <tr>
+                    <th>英文品名</th>
+                    <th>中文</th>
+                    <th>单价</th>
+                    <th>数量</th>
+                    <th>总价</th>
+                    <th>HS code</th>
+                    <th>单位</th>
+                    <th>来源</th>
+                    <th class="row-action-col" aria-label="商品行操作">操作</th>
+                  </tr>
+                </thead>
+                <tbody></tbody>
+              </table>
+            </div>
+            <button id="addItem">+ 商品行</button>
+            <button class="secondary-action" data-open-tab="calc">计算流程</button>
+          </div>
+
+          <div class="tab-panel" id="tab-packing">
+            <div class="table-wrap">
+              <table id="packingTable">
+                <thead>
+                  <tr>
+                    <th>品名</th>
+                    <th>数量</th>
+                    <th>箱数</th>
+                    <th>毛重</th>
+                    <th>净重</th>
+                    <th>CBM</th>
+                    <th>HS code</th>
+                    <th class="row-action-col" aria-label="包装行操作">操作</th>
+                  </tr>
+                </thead>
+                <tbody></tbody>
+              </table>
+            </div>
+            <button id="addPacking">+ 包装行</button>
+            <button class="secondary-action" data-open-tab="calc">计算流程</button>
+          </div>
+
+          <div class="tab-panel" id="tab-calc">
+            <div class="calc-head">
+              <button id="recalculateButton">重新计算</button>
+            </div>
+            <div class="calc-grid" id="calcGrid"></div>
+          </div>
+
+          <div class="tab-panel" id="tab-import">
+            <div class="import-box">
+              <label class="input-label" for="draftFile">上传整理稿 JSON 文件</label>
+              <input id="draftFile" type="file" accept=".json,.txt,.md" />
+              <label class="input-label" for="draftText">或粘贴 skill 输出的 JSON/整理稿</label>
+              <textarea id="draftText" placeholder="粘贴 $trade-doc-summary-extractor 输出的 JSON block"></textarea>
+              <button id="importDraftButton">导入整理稿</button>
+              <div class="source-note" id="importStatus">支持直接导入整理后的 shipment_groups / fields / items / packing_lines。</div>
+            </div>
+          </div>
+
+          <div class="tab-panel" id="tab-skills">
+            <div class="skill-list" id="skillList"></div>
+          </div>
+        </section>
+
+        <aside class="panel issue-panel">
+          <div class="panel-head">
+            <h2>问题</h2>
+            <span id="issueCount">0</span>
+          </div>
+          <div class="issue-list" id="issueList"></div>
+
+          <h3>导出</h3>
+          <div class="export-box" id="exportBox"><span>尚未导出</span></div>
+        </aside>
+      </section>
+    </main>
+    <script src="./exceljs.min.js"></script>
+    <script src="./main.js"></script>
+  </body>
+</html>
