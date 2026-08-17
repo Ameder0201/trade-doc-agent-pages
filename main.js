@@ -56,7 +56,8 @@ const fieldLabels = {
   origin_country: "原产国",
   loading_port: "装港",
   destination_port: "目的港",
-  trade_term: "贸易条款",
+  trade_term: "交货条款",
+  payment_term: "付款条款",
   gross_weight: "总毛重",
   si_template: "SI模板",
   container_qty: "柜量",
@@ -74,8 +75,16 @@ const fixedFields = [
   "loading_port",
   "destination_port",
   "trade_term",
+  "payment_term",
   "gross_weight",
 ];
+
+const fieldChoices = {
+  trade_term: ["FOB", "EXW", "CIF SHUWAIKH", "CIF", "CFR SHUWAIKH", "CFR", "DAP", "DDP"],
+  payment_term: ["T/T", "T/T USD", "L/C", "30% T/T DEPOSIT, 70% BEFORE LOADING"],
+};
+
+const invoiceNumberPattern = /^(FT|KL)(01|02)\d{6}\d{2}$/;
 
 const siFields = [
   "si_template",
@@ -112,7 +121,7 @@ function extractionIssueIsCurrent(issue, data) {
 
 function validateInBrowser(data) {
   const issues = (data.issues || []).filter(
-    (issue) => issue.source === "trade-doc-summary-extractor" && extractionIssueIsCurrent(issue, data),
+    (issue) => (!issue.source || issue.source === "trade-doc-summary-extractor") && extractionIssueIsCurrent(issue, data),
   );
   const add = (level, type, message, field) => issues.push({ level, type, message, field, source: "browser-validator" });
   const fields = data.fields || {};
@@ -133,6 +142,7 @@ function validateInBrowser(data) {
     const expected = Number((quantity * unitPrice).toFixed(2));
     if (Math.abs(expected - amount) > 0.05) add("warning", "amount_mismatch", `第 ${index + 1} 行金额不一致：数量*单价=${expected.toFixed(2)}，来源金额=${amount.toFixed(2)}`, `items[${index}].amount`);
     if (!item.hs_code) add("warning", "missing_hs_code", `第 ${index + 1} 行缺少 HS code`, `items[${index}].hs_code`);
+    if (normalizeQuantityUnit(item.unit) === "PKGS") add("error", "package_count_used_as_quantity", `第 ${index + 1} 行把 PKGS 当作商品 Quantity；请填写实际件数、米数或其他货物数量`, `items[${index}].quantity`);
   });
   (data.packing_lines || []).forEach((line, index) => {
     if (line.gross_weight === null || line.gross_weight === "" || line.gross_weight === undefined) {
@@ -154,6 +164,16 @@ function clearWorkbookRows(sheet, fromRow, toRow, fromColumn, toColumn) {
       cell.value = null;
     }
   }
+}
+
+function deliveryAndPaymentText(data) {
+  const payment = String(fieldValue(data, "payment_term", "") || "").trim();
+  let delivery = String(fieldValue(data, "trade_term", "") || "").trim();
+  const destination = String(fieldValue(data, "destination_port", "") || "").trim();
+  if (/^(CIF|CFR|CPT|CIP)$/i.test(delivery) && destination) {
+    delivery = `${delivery} ${destination}`;
+  }
+  return [payment, delivery].filter(Boolean).join(" ");
 }
 
 async function exportPipkgInBrowser(data) {
@@ -179,7 +199,7 @@ async function exportPipkgInBrowser(data) {
   setWorkbookCell(pkg, "B9", fieldValue(data, "loading_port"));
   setWorkbookCell(pi, "A15", fieldValue(data, "destination_port"));
   setWorkbookCell(pkg, "A11", fieldValue(data, "destination_port"));
-  const paymentText = `TT ${fieldValue(data, "trade_term", "TT")} ${fieldValue(data, "destination_port")}`.trim();
+  const paymentText = deliveryAndPaymentText(data);
   setWorkbookCell(pi, "C15", paymentText);
   setWorkbookCell(pkg, "C11", paymentText);
   clearWorkbookRows(pi, 19, 34, 1, 7);
@@ -244,6 +264,87 @@ function setField(name, value) {
   state.current.fields[name].confidence = "manual";
 }
 
+function localDateParts(date = new Date()) {
+  const year = String(date.getFullYear());
+  const month = String(date.getMonth() + 1).padStart(2, "0");
+  const day = String(date.getDate()).padStart(2, "0");
+  return {
+    iso: `${year}-${month}-${day}`,
+    compact: `${year.slice(-2)}${month}${day}`,
+  };
+}
+
+function knownCompanyCode() {
+  const detected = detectCompanyCode();
+  return detected === "KL" ? "KL" : "FT";
+}
+
+function shipmentCode() {
+  return state.current?.case?.shipment_type === "fedex" ? "02" : "01";
+}
+
+function storedInvoiceNumbers() {
+  try {
+    const stored = JSON.parse(window.localStorage.getItem("tradeDocInvoiceNumbers") || "[]");
+    return Array.isArray(stored) ? stored : [];
+  } catch {
+    return [];
+  }
+}
+
+function reserveInvoiceNumber(number) {
+  try {
+    const numbers = new Set(storedInvoiceNumbers());
+    numbers.add(number);
+    window.localStorage.setItem("tradeDocInvoiceNumbers", JSON.stringify([...numbers].slice(-500)));
+  } catch {
+    // The number still works for the current session when browser storage is unavailable.
+  }
+}
+
+function nextDailyInvoiceNumber() {
+  const prefix = `${knownCompanyCode()}${shipmentCode()}${localDateParts().compact}`;
+  const candidates = [
+    ...storedInvoiceNumbers(),
+    ...(state.cases || []).flatMap((item) => [item.case_no, item.name]),
+  ].filter((value) => String(value || "").startsWith(prefix));
+  const maxSequence = candidates.reduce((max, value) => {
+    const match = String(value).match(/(\d{2})$/);
+    return match ? Math.max(max, Number(match[1])) : max;
+  }, 0);
+  const number = `${prefix}${String(maxSequence + 1).padStart(2, "0")}`;
+  reserveInvoiceNumber(number);
+  return number;
+}
+
+function ensureDefaultInvoiceFields() {
+  if (!state.current) return;
+  if (!state.current.fields) state.current.fields = {};
+  const existing = String(getField("invoice_no") || "").trim().toUpperCase();
+  if (!invoiceNumberPattern.test(existing)) {
+    const generated = nextDailyInvoiceNumber();
+    state.current.fields.invoice_no = {
+      value: generated,
+      confidence: "manual",
+      generated: true,
+      evidence: [{ file: "default_naming_rule", locator: "current_date", text: "按公司、运输方式、当日日期和当日序号生成" }],
+    };
+    state.current.case.case_no = generated;
+    state.current.base_case_no = generated;
+  } else {
+    reserveInvoiceNumber(existing);
+    state.current.case.case_no = existing;
+    if (!state.current.base_case_no) state.current.base_case_no = existing;
+  }
+  if (!getField("invoice_date")) {
+    state.current.fields.invoice_date = {
+      value: localDateParts().iso,
+      confidence: "manual",
+      evidence: [{ file: "default_naming_rule", locator: "current_date", text: "默认使用填表日期" }],
+    };
+  }
+}
+
 function partyBlock(party) {
   return [party.company, party.address, party.contact, party.email].filter(Boolean).join("\n");
 }
@@ -256,8 +357,16 @@ function consigneeByCode(code) {
   return state.knowledge.consignees.find((item) => item.code === code);
 }
 
+function partyCodeForBlock(type, value) {
+  const parties = type === "shipper" ? state.knowledge.companies : state.knowledge.consignees;
+  const block = String(value || "").toUpperCase();
+  const matched = parties.find((item) => block.includes(String(item.company || "").toUpperCase()));
+  return matched?.code || "CUSTOM";
+}
+
 function detectCompanyCode() {
   const stored = getField("shipper_code");
+  if (stored === "CUSTOM") return "CUSTOM";
   if (companyByCode(stored)) return stored;
   const block = String(getField("shipper_block") || getField("shipper_company")).toUpperCase();
   const matched = state.knowledge.companies.find((item) => block.includes(item.company.toUpperCase()));
@@ -266,6 +375,7 @@ function detectCompanyCode() {
 
 function detectConsigneeCode() {
   const stored = getField("consignee_code");
+  if (stored === "CUSTOM") return "CUSTOM";
   if (consigneeByCode(stored)) return stored;
   const block = String(getField("consignee_company")).toUpperCase();
   const matched = state.knowledge.consignees.find((item) => block.includes(item.company.toUpperCase()));
@@ -277,6 +387,23 @@ function renderOptions(items, selectedCode) {
     .map((item) => `<option value="${item.code}" ${item.code === selectedCode ? "selected" : ""}>${item.keyword}</option>`)
     .join("");
   return `${options}<option value="CUSTOM" ${selectedCode === "CUSTOM" ? "selected" : ""}>自填</option>`;
+}
+
+function renderChoiceControl(name, value) {
+  const choices = fieldChoices[name] || [];
+  const selected = choices.includes(String(value || "")) ? value : "CUSTOM";
+  const options = choices
+    .map((choice) => `<option value="${choice}" ${choice === selected ? "selected" : ""}>${choice}</option>`)
+    .join("");
+  return `
+    <div class="choice-control">
+      <select data-choice-select="${name}">
+        ${options}
+        <option value="CUSTOM" ${selected === "CUSTOM" ? "selected" : ""}>自定义</option>
+      </select>
+      <input data-field="${name}" data-choice-input="${name}" value="${value || ""}" />
+    </div>
+  `;
 }
 
 function evidenceText(field) {
@@ -412,6 +539,9 @@ function renderFields() {
           </div>
         `;
       }
+      if (fieldChoices[name]) {
+        input = renderChoiceControl(name, field.value);
+      }
       return `
         <div class="field-box">
           <label>
@@ -446,11 +576,44 @@ function renderFields() {
       }
       renderFields();
       renderSummary();
+      if (code === "CUSTOM") {
+        window.requestAnimationFrame(() => {
+          grid.querySelector(`[data-party-select="${type}"]`)?.closest(".field-control")?.querySelector("textarea")?.focus();
+        });
+      }
+    });
+  });
+  grid.querySelectorAll("[data-choice-select]").forEach((select) => {
+    select.addEventListener("change", (event) => {
+      const name = event.target.dataset.choiceSelect;
+      const input = grid.querySelector(`[data-choice-input="${name}"]`);
+      if (event.target.value !== "CUSTOM") {
+        setField(name, event.target.value);
+        if (input) input.value = event.target.value;
+      }
+      input?.focus();
+      renderSummary();
     });
   });
   grid.querySelectorAll("[data-field]").forEach((input) => {
     input.addEventListener("input", (event) => {
-      setField(event.target.dataset.field, event.target.value);
+      const name = event.target.dataset.field;
+      setField(name, event.target.value);
+      if (name === "shipper_block") {
+        setField("shipper_code", "CUSTOM");
+        const select = grid.querySelector('[data-party-select="shipper"]');
+        if (select) select.value = "CUSTOM";
+      }
+      if (name === "consignee_company") {
+        setField("consignee_code", "CUSTOM");
+        const select = grid.querySelector('[data-party-select="consignee"]');
+        if (select) select.value = "CUSTOM";
+      }
+      if (fieldChoices[name]) {
+        const choice = (fieldChoices[name] || []).includes(event.target.value) ? event.target.value : "CUSTOM";
+        const select = grid.querySelector(`[data-choice-select="${name}"]`);
+        if (select) select.value = choice;
+      }
       renderSummary();
     });
   });
@@ -577,9 +740,9 @@ function renderItems() {
         <td>${editableCell(item.description_cn, "description_cn", index, "items")}</td>
         <td>${editableCell(item.unit_price, "unit_price", index, "items")}</td>
         <td>${editableCell(item.quantity, "quantity", index, "items")}</td>
+        <td>${editableCell(item.unit, "unit", index, "items")}</td>
         <td>${editableCell(item.amount, "amount", index, "items")}</td>
         <td>${editableCell(item.hs_code, "hs_code", index, "items")}</td>
-        <td>${editableCell(item.unit, "unit", index, "items")}</td>
         <td>${item.source || "manual"}</td>
         <td class="row-action-cell">
           <button type="button" class="row-delete-button" data-delete-table="items" data-delete-row="${index}" title="删除此商品行" aria-label="删除第 ${index + 1} 个商品行">×</button>
@@ -610,6 +773,7 @@ function renderPacking() {
       <tr>
         <td>${editableCell(line.description_en, "description_en", index, "packing_lines", true)}</td>
         <td>${editableCell(line.quantity, "quantity", index, "packing_lines")}</td>
+        <td>${editableCell(line.unit, "unit", index, "packing_lines")}</td>
         <td>${editableCell(line.packages, "packages", index, "packing_lines")}</td>
         <td>${editableCell(line.gross_weight, "gross_weight", index, "packing_lines")}</td>
         <td>${editableCell(line.net_weight, "net_weight", index, "packing_lines")}</td>
@@ -635,7 +799,7 @@ function recalculateCurrent() {
     const quantity = Number(line.quantity || 0);
     const desc = String(line.description_en || "");
     const thicknessMatch = desc.match(/(\d+(?:\.\d+)?)\s*mm/i) || desc.match(/(\d+(?:\.\d+)?)\s*\*/);
-    if (quantity && thicknessMatch && !Number(line.gross_weight || 0)) {
+    if (quantity && normalizeQuantityUnit(line.unit) === "SQM" && thicknessMatch && !Number(line.gross_weight || 0)) {
       const estimate = quantity * Number(thicknessMatch[1]) * 2.5;
       line.gross_weight = Number(estimate.toFixed(1));
       line.net_weight = Number(estimate.toFixed(1));
@@ -650,13 +814,18 @@ function renderCalc() {
   const grid = qs("calcGrid");
   if (!grid || !state.current) return;
   const totalAmount = state.current.items.reduce((sum, item) => sum + Number(item.amount || 0), 0);
-  const totalQty = state.current.items.reduce((sum, item) => sum + Number(item.quantity || 0), 0);
+  const quantityTotals = state.current.items.reduce((totals, item) => {
+    const unit = normalizeQuantityUnit(item.unit);
+    totals[unit] = (totals[unit] || 0) + Number(item.quantity || 0);
+    return totals;
+  }, {});
+  const totalQty = Object.entries(quantityTotals).map(([unit, value]) => `${money(value)} ${unit}`).join(" / ") || "待补";
   const totalPkg = state.current.packing_lines.reduce((sum, line) => sum + Number(line.packages || 0), 0);
   const totalGross = state.current.packing_lines.reduce((sum, line) => sum + Number(line.gross_weight || 0), 0);
   const totalNet = state.current.packing_lines.reduce((sum, line) => sum + Number(line.net_weight || 0), 0);
   const totalCbm = state.current.packing_lines.reduce((sum, line) => sum + Number(line.cbm || 0), 0);
   grid.innerHTML = `
-    <div class="summary-item"><div class="summary-label">Quantity</div><div class="summary-value">${money(totalQty)}</div></div>
+    <div class="summary-item"><div class="summary-label">Quantity</div><div class="summary-value">${totalQty}</div></div>
     <div class="summary-item"><div class="summary-label">PKG</div><div class="summary-value">${totalPkg || "待补"}</div></div>
     <div class="summary-item"><div class="summary-label">G.W.</div><div class="summary-value">${money(totalGross)} KGS</div></div>
     <div class="summary-item"><div class="summary-label">N.W.</div><div class="summary-value">${money(totalNet)} KGS</div></div>
@@ -852,6 +1021,34 @@ function fieldObjectFromDraft(field) {
   };
 }
 
+function firstDraftField(container, names) {
+  return names.map((name) => container?.[name]).find((field) => {
+    const value = valueFromDraftField(field);
+    return value !== undefined && value !== null && String(value).trim() !== "";
+  });
+}
+
+function partyFieldFromDraft(container, prefix) {
+  const block = firstDraftField(container, [`${prefix}_block`]);
+  if (block) return block;
+  const companyField = firstDraftField(container, [`${prefix}_company`, `${prefix}_name`]);
+  if (String(valueFromDraftField(companyField) || "").includes("\n")) return companyField;
+  const fields = [
+    companyField,
+    firstDraftField(container, [`${prefix}_address`]),
+    firstDraftField(container, [`${prefix}_contact`, `${prefix}_contact_name`]),
+    firstDraftField(container, [`${prefix}_phone`]),
+    firstDraftField(container, [`${prefix}_email`]),
+  ].filter(Boolean);
+  const values = [...new Set(fields.map(valueFromDraftField).map((value) => String(value || "").trim()).filter(Boolean))];
+  if (!values.length) return undefined;
+  return {
+    value: values.join("\n"),
+    confidence: fields.map((field) => draftConfidence(field, "imported")).find((value) => value === "low") || draftConfidence(fields[0]),
+    evidence: fields.flatMap((field) => evidenceFromDraftField(field)),
+  };
+}
+
 function invoiceNoForGroup(baseNo, index) {
   const text = String(baseNo || "");
   const match = text.match(/^(.*?)(\d{2})$/);
@@ -859,36 +1056,104 @@ function invoiceNoForGroup(baseNo, index) {
   return `${match[1]}${String(Number(match[2]) + index).padStart(2, "0")}`;
 }
 
+function firstDefined(...values) {
+  return values.find((value) => value !== undefined && value !== null && value !== "");
+}
+
+function normalizeQuantityUnit(unit) {
+  const normalized = String(unit || "OTHER").trim().toUpperCase();
+  if (["M", "METER", "METERS", "METRE", "METRES"].includes(normalized)) return "M";
+  if (["PC", "PCS", "PIECE", "PIECES"].includes(normalized)) return "PCS";
+  if (["PKG", "PKGS", "PACKAGE", "PACKAGES"].includes(normalized)) return "PKGS";
+  return normalized || "OTHER";
+}
+
+function draftNumber(value, fallback = 0) {
+  const normalized = typeof value === "string" ? value.replace(/,/g, "").trim() : value;
+  const number = Number(normalized);
+  return Number.isFinite(number) ? number : fallback;
+}
+
+function draftNumberOrBlank(...values) {
+  const value = firstDefined(...values);
+  return value === undefined ? "" : draftNumber(value, "");
+}
+
+function normalizeDraftQuantity(record) {
+  const sourceQuantity = draftNumber(firstDefined(record.quantity_source, record.source_quantity, record.quantity, 0));
+  const sourceUnit = normalizeQuantityUnit(firstDefined(record.quantity_source_unit, record.source_unit, record.unit));
+  const pieceLength = draftNumber(firstDefined(record.piece_length_m, record.length_per_piece_m, 0));
+  const explicitQuantity = firstDefined(record.pipkg_quantity, record.piece_count_calculated);
+  let quantity = explicitQuantity === undefined ? sourceQuantity : draftNumber(explicitQuantity);
+  let unit = normalizeQuantityUnit(firstDefined(record.pipkg_quantity_unit, explicitQuantity !== undefined ? "PCS" : sourceUnit));
+  if (explicitQuantity === undefined && sourceUnit === "M" && pieceLength > 0) {
+    quantity = Number((sourceQuantity / pieceLength).toFixed(6));
+    unit = "PCS";
+  }
+  const convertedMetersToPieces = sourceUnit === "M" && unit === "PCS" && pieceLength > 0;
+  const sourceUnitPrice = draftNumber(firstDefined(record.unit_price_source, record.source_unit_price, record.unit_price, 0));
+  let unitPrice = draftNumber(firstDefined(record.pipkg_unit_price, sourceUnitPrice));
+  if (convertedMetersToPieces && record.pipkg_unit_price === undefined && sourceUnitPrice) {
+    unitPrice = Number((sourceUnitPrice * pieceLength).toFixed(6));
+  }
+  return {
+    quantity,
+    unit,
+    unitPrice,
+    quantity_source: sourceQuantity,
+    quantity_source_unit: sourceUnit,
+    piece_length_m: pieceLength || null,
+    piece_count_calculated: unit === "PCS" && sourceUnit === "M" && pieceLength > 0 ? quantity : null,
+  };
+}
+
+function quantitySourceNote(record) {
+  if (!record.piece_length_m || record.quantity_source_unit !== "M") return "";
+  return `${record.quantity_source} M ÷ ${record.piece_length_m} M/PC = ${record.quantity} PCS`;
+}
+
 function mapDraftItem(item) {
+  const quantity = normalizeDraftQuantity(item);
+  const sourceAmount = firstDefined(item.amount_calculated, item.amount_source, item.amount);
   return {
     description_en: item.description_en || "",
     description_cn: item.description_cn || "",
     spec: item.spec || "",
     hs_code: item.hs_code || "",
-    quantity: item.quantity || 0,
-    unit: item.unit || "PCS",
-    unit_price: item.unit_price || 0,
-    amount: item.amount_calculated ?? item.amount_source ?? item.amount ?? 0,
+    quantity: quantity.quantity,
+    unit: quantity.unit,
+    unit_price: quantity.unitPrice,
+    amount: sourceAmount === undefined ? quantity.quantity * quantity.unitPrice : draftNumber(sourceAmount),
     material: item.material || "",
     use: item.use || "",
-    source: item.allocation_method ? `整理稿导入 · ${item.allocation_method}` : "整理稿导入",
+    source: [item.allocation_method ? `整理稿导入 · ${item.allocation_method}` : "整理稿导入", quantitySourceNote(quantity)].filter(Boolean).join(" · "),
     confidence: item.confidence || "imported",
     container_breakdown: item.container_breakdown || [],
+    quantity_source: quantity.quantity_source,
+    quantity_source_unit: quantity.quantity_source_unit,
+    piece_length_m: quantity.piece_length_m,
+    piece_count_calculated: quantity.piece_count_calculated,
   };
 }
 
 function mapDraftPackingLine(line) {
+  const quantity = normalizeDraftQuantity(line);
   return {
     description_en: line.description_en || "",
-    quantity: line.quantity || 0,
-    packages: line.packages || 0,
-    gross_weight: line.gross_weight_calculated ?? line.gross_weight_source ?? line.gross_weight ?? "",
-    net_weight: line.net_weight_calculated ?? line.net_weight_source ?? line.net_weight ?? "",
-    cbm: line.cbm_calculated ?? line.cbm_source ?? line.cbm ?? "",
+    quantity: quantity.quantity,
+    unit: quantity.unit,
+    packages: draftNumber(firstDefined(line.packages, 0)),
+    gross_weight: draftNumberOrBlank(line.gross_weight_calculated, line.gross_weight_source, line.gross_weight),
+    net_weight: draftNumberOrBlank(line.net_weight_calculated, line.net_weight_source, line.net_weight),
+    cbm: draftNumberOrBlank(line.cbm_calculated, line.cbm_source, line.cbm),
     hs_code: line.hs_code || "",
-    source: line.method ? `整理稿导入 · ${line.method}` : "整理稿导入",
+    source: [line.method ? `整理稿导入 · ${line.method}` : "整理稿导入", quantitySourceNote(quantity)].filter(Boolean).join(" · "),
     confidence: line.confidence || "imported",
     container_breakdown: line.container_breakdown || [],
+    quantity_source: quantity.quantity_source,
+    quantity_source_unit: quantity.quantity_source_unit,
+    piece_length_m: quantity.piece_length_m,
+    piece_count_calculated: quantity.piece_count_calculated,
   };
 }
 
@@ -896,27 +1161,19 @@ function applyShipmentGroup(group, index = 0) {
   if (!state.current) return;
   state.activeGroupIndex = index;
   state.current.active_group_id = group.group_id || valueFromDraftField(group.bill_of_lading_no) || "";
-  if (!state.current.base_case_no) {
-    state.current.base_case_no = state.current.case?.case_no || getField("invoice_no");
-  }
-  const groupInvoiceNo = invoiceNoForGroup(state.current.base_case_no, index);
-  if (groupInvoiceNo) {
-    state.current.case.case_no = groupInvoiceNo;
-    state.current.fields.invoice_no = {
-      value: groupInvoiceNo,
-      confidence: "manual",
-      evidence: [{ file: "split_rule", locator: "bill_of_lading_group", text: "按提单顺序递增单号尾号" }],
-    };
-  }
   const mapped = {
+    invoice_no: group.invoice_no,
+    invoice_date: group.invoice_date,
     bill_of_lading_no: group.bill_of_lading_no,
     booking_no: group.booking_no,
-    shipper_block: group.shipper_block,
-    consignee_company: group.consignee_block,
+    shipper_block: partyFieldFromDraft(group, "shipper"),
+    consignee_company: partyFieldFromDraft(group, "consignee"),
     transport: group.transport,
     loading_port: group.loading_port,
     destination_port: group.destination_port,
-    trade_term: group.trade_term,
+    trade_term: firstDraftField(group, ["trade_term", "terms_of_delivery", "delivery_term", "incoterm"]),
+    payment_term: firstDraftField(group, ["payment_term", "terms_of_payment", "payment_terms"]),
+    gross_weight: firstDraftField(group, ["gross_weight"]) ?? group.totals?.gross_weight,
     container_qty: group.si?.container_qty,
     vessel_voyage: group.si?.vessel_voyage,
     si_template: group.si?.si_template || group.si?.carrier,
@@ -927,6 +1184,26 @@ function applyShipmentGroup(group, index = 0) {
       state.current.fields[key] = fieldObjectFromDraft(field);
     }
   });
+  if (valueFromDraftField(mapped.shipper_block)) {
+    state.current.fields.shipper_code = fieldObjectFromDraft(partyCodeForBlock("shipper", valueFromDraftField(mapped.shipper_block)));
+  }
+  if (valueFromDraftField(mapped.consignee_company)) {
+    state.current.fields.consignee_code = fieldObjectFromDraft(partyCodeForBlock("consignee", valueFromDraftField(mapped.consignee_company)));
+  }
+  ensureDefaultInvoiceFields();
+  const explicitGroupInvoice = String(valueFromDraftField(group.invoice_no) || "").trim().toUpperCase();
+  const groupInvoiceNo = invoiceNumberPattern.test(explicitGroupInvoice)
+    ? explicitGroupInvoice
+    : invoiceNoForGroup(state.current.base_case_no, index);
+  if (groupInvoiceNo) {
+    reserveInvoiceNumber(groupInvoiceNo);
+    state.current.case.case_no = groupInvoiceNo;
+    state.current.fields.invoice_no = {
+      value: groupInvoiceNo,
+      confidence: "manual",
+      evidence: [{ file: "split_rule", locator: "bill_of_lading_group", text: "按提单顺序递增单号尾号" }],
+    };
+  }
   state.current.items = (group.items || []).map(mapDraftItem);
   state.current.packing_lines = (group.packing_lines || []).map(mapDraftPackingLine);
   state.current.issues = group.issues || [];
@@ -935,6 +1212,26 @@ function applyShipmentGroup(group, index = 0) {
 }
 
 function applyDraft(payload) {
+  const incomingInvoice = String(
+    valueFromDraftField(payload.fields?.invoice_no)
+      || valueFromDraftField(payload.shipment_groups?.[0]?.invoice_no)
+      || payload.case_no
+      || "",
+  ).trim().toUpperCase();
+  const currentInvoice = String(getField("invoice_no") || "").trim().toUpperCase();
+  if (state.current && incomingInvoice && currentInvoice && incomingInvoice !== currentInvoice) {
+    const transport = valueFromDraftField(payload.shipment_groups?.[0]?.transport) || valueFromDraftField(payload.fields?.transport);
+    state.current = {
+      case: { case_no: "IMPORTED", shipment_type: /EXPRESS|FEDEX/i.test(String(transport || "")) ? "fedex" : "sea" },
+      files: [],
+      fields: {},
+      items: [],
+      packing_lines: [],
+      issues: [],
+      shipment_groups: [],
+      skill_trace: [],
+    };
+  }
   if (!state.current) {
     state.current = {
       case: { case_no: "IMPORTED", shipment_type: "sea" },
@@ -958,6 +1255,19 @@ function applyDraft(payload) {
       state.current.fields[key] = fieldObjectFromDraft(field);
     }
   });
+  const topLevelShipper = partyFieldFromDraft(draft.fields || draft, "shipper");
+  const topLevelConsignee = partyFieldFromDraft(draft.fields || draft, "consignee");
+  if (topLevelShipper) state.current.fields.shipper_block = fieldObjectFromDraft(topLevelShipper);
+  if (topLevelConsignee) state.current.fields.consignee_company = fieldObjectFromDraft(topLevelConsignee);
+  if (topLevelShipper) state.current.fields.shipper_code = fieldObjectFromDraft(partyCodeForBlock("shipper", valueFromDraftField(topLevelShipper)));
+  if (topLevelConsignee) state.current.fields.consignee_code = fieldObjectFromDraft(partyCodeForBlock("consignee", valueFromDraftField(topLevelConsignee)));
+  const topLevelTradeTerm = firstDraftField(draft.fields || draft, ["trade_term", "terms_of_delivery", "delivery_term", "incoterm"]);
+  const topLevelPaymentTerm = firstDraftField(draft.fields || draft, ["payment_term", "terms_of_payment", "payment_terms"]);
+  if (topLevelTradeTerm) state.current.fields.trade_term = fieldObjectFromDraft(topLevelTradeTerm);
+  if (topLevelPaymentTerm) state.current.fields.payment_term = fieldObjectFromDraft(topLevelPaymentTerm);
+  if (!getField("invoice_no") && invoiceNumberPattern.test(String(draft.case_no || "").toUpperCase())) {
+    state.current.fields.invoice_no = fieldObjectFromDraft(String(draft.case_no).toUpperCase());
+  }
   const importedInvoiceNo = getField("invoice_no");
   if (importedInvoiceNo) {
     state.current.case.case_no = importedInvoiceNo;
@@ -973,6 +1283,7 @@ function applyDraft(payload) {
   if (draft.shipment_groups?.length === 1) {
     applyShipmentGroup(draft.shipment_groups[0], 0);
   } else {
+    if (!draft.shipment_groups?.length || getField("shipper_block")) ensureDefaultInvoiceFields();
     state.activeGroupIndex = -1;
     state.current.active_group_id = "";
     renderAll();
@@ -1044,6 +1355,7 @@ async function scanFolder(folder) {
   });
   state.current = payload;
   state.activeGroupIndex = -1;
+  ensureDefaultInvoiceFields();
   if (!state.current.fields.si_template) {
     state.current.fields.si_template = { value: "MSC", confidence: "manual", evidence: [] };
   }
@@ -1137,6 +1449,7 @@ function addPacking() {
   state.current.packing_lines.push({
     description_en: "",
     quantity: "",
+    unit: "PCS",
     packages: "",
     gross_weight: "",
     net_weight: "",

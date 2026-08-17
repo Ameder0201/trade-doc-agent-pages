@@ -454,6 +454,16 @@ p {
   gap: 8px;
 }
 
+.field-control textarea {
+  min-height: 112px;
+}
+
+.choice-control {
+  display: grid;
+  grid-template-columns: 150px minmax(0, 1fr);
+  gap: 8px;
+}
+
 .field-box label {
   display: flex;
   align-items: center;
@@ -649,5 +659,20 @@ td textarea {
 
   .summary-grid {
     grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+@media (max-width: 720px) {
+  .shell {
+    padding: 10px;
+  }
+
+  .field-grid,
+  .calc-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .choice-control {
+    grid-template-columns: 145px minmax(0, 1fr);
   }
 }
