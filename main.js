@@ -371,7 +371,7 @@ async function exportPipkgInBrowser(data) {
   if (!window.ExcelJS) throw new Error("Excel 导出组件未加载");
   applyDefaultNetWeights(data);
   reconcilePackingTotals(data, true);
-  const templateResponse = await fetch("../templates/FT0126021101样例.xlsx");
+  const templateResponse = await fetch("./templates/FT0126021101样例.xlsx");
   if (!templateResponse.ok) throw new Error("无法读取 PIPKG 模板");
   const workbook = new window.ExcelJS.Workbook();
   await workbook.xlsx.load(await templateResponse.arrayBuffer());
@@ -1710,8 +1710,14 @@ async function exportByKind(kind) {
       <span>${result.issues.length} 个问题随文件记录，导出前请确认关键字段。</span>
     `;
   } catch {
-    const filename = await exportPipkgInBrowser(state.current);
-    qs("exportBox").innerHTML = `<strong>${filename}</strong><span>文件已由浏览器生成并下载。</span>`;
+    try {
+      const filename = await exportPipkgInBrowser(state.current);
+      qs("exportBox").innerHTML = `<strong>${filename}</strong><span>文件已由浏览器生成并下载。</span>`;
+    } catch (error) {
+      qs("exportBox").innerHTML = `<strong>导出失败</strong><span>${error.message}</span>`;
+      setStatus("导出失败");
+      return;
+    }
   }
   setStatus("已导出");
 }
