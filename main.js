@@ -119,7 +119,18 @@ function extractionIssueIsCurrent(issue, data) {
   return Number(match[2]) < (data[match[1]] || []).length;
 }
 
+function applyDefaultNetWeights(data) {
+  (data?.packing_lines || []).forEach((line) => {
+    if (line.net_weight !== null && line.net_weight !== "" && line.net_weight !== undefined) return;
+    const grossWeight = Number(line.gross_weight || 0);
+    if (!(grossWeight > 0)) return;
+    line.net_weight = Number((grossWeight * 0.9).toFixed(3));
+    line.net_weight_method = "default_90_percent_of_gross";
+  });
+}
+
 function validateInBrowser(data) {
+  applyDefaultNetWeights(data);
   const issues = (data.issues || []).filter(
     (issue) => (!issue.source || issue.source === "trade-doc-summary-extractor") && extractionIssueIsCurrent(issue, data),
   );
@@ -142,13 +153,40 @@ function validateInBrowser(data) {
     const expected = Number((quantity * unitPrice).toFixed(2));
     if (Math.abs(expected - amount) > 0.05) add("warning", "amount_mismatch", `第 ${index + 1} 行金额不一致：数量*单价=${expected.toFixed(2)}，来源金额=${amount.toFixed(2)}`, `items[${index}].amount`);
     if (!item.hs_code) add("warning", "missing_hs_code", `第 ${index + 1} 行缺少 HS code`, `items[${index}].hs_code`);
-    if (normalizeQuantityUnit(item.unit) === "PKGS") add("error", "package_count_used_as_quantity", `第 ${index + 1} 行把 PKGS 当作商品 Quantity；请填写实际件数、米数或其他货物数量`, `items[${index}].quantity`);
+    const reviewedUnit = normalizeQuantityUnit(item.unit);
+    const sourceUnit = normalizeQuantityUnit(item.quantity_source_unit);
+    if (reviewedUnit === "PKGS") add("error", "package_count_used_as_quantity", `第 ${index + 1} 行把 PKGS 当作商品 Quantity；请填写实际件数、米数或其他货物数量`, `items[${index}].quantity`);
+    if (reviewedUnit === "SET" && (item.quantity_source_unit || String(item.source || "").includes("整理稿")) && !String(item.set_basis || "").trim()) {
+      add("error", "set_without_source_basis", `第 ${index + 1} 行使用 SET，但没有来源明确的成套依据；分类汇总不能直接写成 1 SET`, `items[${index}].unit`);
+    }
+    if (sourceUnit === "M" && reviewedUnit === "PCS") {
+      const sourceQuantity = Number(item.quantity_source || 0);
+      const pieceLength = Number(item.piece_length_m || 0);
+      if (!(pieceLength > 0)) {
+        add("error", "missing_piece_length", `第 ${index + 1} 行把米数换算为件数，但缺少可靠的单件长度`, `items[${index}].piece_length_m`);
+      } else {
+        const expectedPieces = sourceQuantity / pieceLength;
+        if (Math.abs(expectedPieces - quantity) > 0.001) {
+          add("error", "piece_count_mismatch", `第 ${index + 1} 行米数换算不一致：${sourceQuantity} M ÷ ${pieceLength} M/PC = ${expectedPieces} PCS，当前为 ${quantity} PCS`, `items[${index}].quantity`);
+        }
+      }
+    }
   });
   (data.packing_lines || []).forEach((line, index) => {
     if (line.gross_weight === null || line.gross_weight === "" || line.gross_weight === undefined) {
       add("warning", "missing_packing_weight", `包装第 ${index + 1} 行缺少毛重，导出前建议人工补录`, `packing_lines[${index}].gross_weight`);
     }
   });
+  const packingGross = (data.packing_lines || []).reduce((sum, line) => sum + Number(line.gross_weight || 0), 0);
+  const packingCbm = (data.packing_lines || []).reduce((sum, line) => sum + Number(line.cbm || 0), 0);
+  const blGross = sourceTotalNumber(data.bl_totals, "gross_weight");
+  const blCbm = sourceTotalNumber(data.bl_totals, "cbm");
+  if (blGross !== null && Math.abs(packingGross - blGross) > 0.0005) {
+    add("warning", "packing_gross_differs_from_bl", `装箱明细毛重 ${packingGross} KGS 与提单 ${data.bl_totals.gross_weight_display || blGross} KGS 不一致；导出总计采用提单值`, "bl_totals.gross_weight");
+  }
+  if (blCbm !== null && Math.abs(packingCbm - blCbm) > 0.0005) {
+    add("warning", "packing_cbm_differs_from_bl", `装箱明细体积 ${packingCbm} CBM 与提单 ${data.bl_totals.cbm_display || blCbm} CBM 不一致；导出总计采用提单值`, "bl_totals.cbm");
+  }
   return { ...data, issues };
 }
 
@@ -174,6 +212,19 @@ function deliveryAndPaymentText(data) {
     delivery = `${delivery} ${destination}`;
   }
   return [payment, delivery].filter(Boolean).join(" ");
+}
+
+function sourceTotalNumber(totals, key) {
+  const raw = valueFromDraftField(totals?.[key]);
+  if (raw === null || raw === undefined || raw === "") return null;
+  const value = Number(String(raw).replace(/,/g, ""));
+  return Number.isFinite(value) ? value : null;
+}
+
+function sourceNumberFormat(display, fallbackDecimals = 3) {
+  const text = String(valueFromDraftField(display) || "").replace(/,/g, "").trim();
+  const decimals = text.includes(".") ? text.split(".").pop().length : fallbackDecimals;
+  return `#,##0${decimals ? `.${"0".repeat(decimals)}` : ""}`;
 }
 
 async function exportPipkgInBrowser(data) {
@@ -204,35 +255,66 @@ async function exportPipkgInBrowser(data) {
   setWorkbookCell(pkg, "C11", paymentText);
   clearWorkbookRows(pi, 19, 34, 1, 7);
   clearWorkbookRows(pkg, 15, 32, 1, 8);
-  (data.items || []).slice(0, 16).forEach((item, index) => {
+  setWorkbookCell(pi, "G18", "UNIT");
+  const items = (data.items || []).slice(0, 16);
+  let totalQuantity = 0;
+  let totalAmount = 0;
+  items.forEach((item, index) => {
     const row = 19 + index;
-    setWorkbookCell(pi, `A${row}`, `${item.description_en || ""} ${item.hs_code || ""}`.trim());
-    setWorkbookCell(pi, `D${row}`, Number(item.quantity || 0));
-    setWorkbookCell(pi, `E${row}`, Number(item.unit_price || 0));
-    pi.getCell(`F${row}`).value = { formula: `D${row}*E${row}` };
-    setWorkbookCell(pi, `G${row}`, item.hs_code || "");
+    const quantity = Number(item.quantity || 0);
+    const unitPrice = Number(item.unit_price || 0);
+    const amount = quantity * unitPrice;
+    setWorkbookCell(pi, `A${row}`, item.description_en || "");
+    setWorkbookCell(pi, `D${row}`, quantity);
+    setWorkbookCell(pi, `E${row}`, unitPrice);
+    pi.getCell(`F${row}`).value = { formula: `D${row}*E${row}`, result: amount };
+    pi.getCell(`F${row}`).numFmt = "#,##0.00";
+    setWorkbookCell(pi, `G${row}`, normalizeQuantityUnit(item.unit));
+    totalQuantity += quantity;
+    totalAmount += amount;
   });
   const packing = (data.packing_lines || []).length
     ? data.packing_lines
     : (data.items || []).map((item) => ({ ...item, packages: "", gross_weight: "", net_weight: "", cbm: "" }));
+  const packingTotals = { C: 0, D: 0, E: 0, F: 0, G: 0 };
   packing.slice(0, 18).forEach((line, index) => {
     const row = 15 + index;
+    const values = {
+      C: Number(line.quantity || 0),
+      D: Number(line.packages || 0),
+      E: line.gross_weight === "" ? 0 : Number(line.gross_weight || 0),
+      F: line.net_weight === "" ? 0 : Number(line.net_weight || 0),
+      G: line.cbm === "" ? 0 : Number(line.cbm || 0),
+    };
     setWorkbookCell(pkg, `A${row}`, `${line.description_en || ""} ${line.hs_code || ""}`.trim());
-    setWorkbookCell(pkg, `C${row}`, Number(line.quantity || 0));
-    setWorkbookCell(pkg, `D${row}`, Number(line.packages || 0));
-    setWorkbookCell(pkg, `E${row}`, line.gross_weight === "" ? "" : Number(line.gross_weight || 0));
-    setWorkbookCell(pkg, `F${row}`, line.net_weight === "" ? "" : Number(line.net_weight || 0));
-    setWorkbookCell(pkg, `G${row}`, line.cbm === "" ? "" : Number(line.cbm || 0));
+    setWorkbookCell(pkg, `C${row}`, values.C);
+    setWorkbookCell(pkg, `D${row}`, values.D);
+    setWorkbookCell(pkg, `E${row}`, line.gross_weight === "" ? "" : values.E);
+    setWorkbookCell(pkg, `F${row}`, line.net_weight === "" ? "" : values.F);
+    setWorkbookCell(pkg, `G${row}`, line.cbm === "" ? "" : values.G);
     setWorkbookCell(pkg, `H${row}`, line.hs_code || "");
+    Object.keys(packingTotals).forEach((column) => {
+      packingTotals[column] += values[column];
+    });
   });
-  pi.getCell("D37").value = { formula: "SUM(D19:D34)" };
-  pi.getCell("F37").value = { formula: "SUM(F19:F34)" };
-  pkg.getCell("C33").value = { formula: "SUM(C15:C32)" };
-  pkg.getCell("D33").value = { formula: "SUM(D15:D32)" };
-  pkg.getCell("E33").value = { formula: "SUM(E15:E32)" };
-  pkg.getCell("F33").value = { formula: "SUM(F15:F32)" };
-  pkg.getCell("G33").value = { formula: "SUM(G15:G32)" };
+  pi.getCell("D37").value = { formula: "SUM(D19:D34)", result: totalQuantity };
+  pi.getCell("F37").value = { formula: "SUM(F19:F34)", result: totalAmount };
+  pi.getCell("F37").numFmt = "#,##0.00";
+  const blGrossWeight = sourceTotalNumber(data.bl_totals, "gross_weight");
+  const blCbm = sourceTotalNumber(data.bl_totals, "cbm");
+  Object.entries(packingTotals).forEach(([column, result]) => {
+    const sourceValue = column === "E" ? blGrossWeight : column === "G" ? blCbm : null;
+    if (sourceValue !== null) {
+      setWorkbookCell(pkg, `${column}33`, sourceValue);
+      const key = column === "E" ? "gross_weight" : "cbm";
+      pkg.getCell(`${column}33`).numFmt = sourceNumberFormat(data.bl_totals?.[`${key}_display`]);
+      return;
+    }
+    pkg.getCell(`${column}33`).value = { formula: `SUM(${column}15:${column}32)`, result };
+  });
+  workbook.calcProperties.calcMode = "auto";
   workbook.calcProperties.fullCalcOnLoad = true;
+  workbook.calcProperties.forceFullCalc = true;
   const blob = new Blob([await workbook.xlsx.writeBuffer()], { type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" });
   const downloadUrl = URL.createObjectURL(blob);
   const anchor = document.createElement("a");
@@ -802,7 +884,10 @@ function recalculateCurrent() {
     if (quantity && normalizeQuantityUnit(line.unit) === "SQM" && thicknessMatch && !Number(line.gross_weight || 0)) {
       const estimate = quantity * Number(thicknessMatch[1]) * 2.5;
       line.gross_weight = Number(estimate.toFixed(1));
-      line.net_weight = Number(estimate.toFixed(1));
+    }
+    if ((line.net_weight === null || line.net_weight === "" || line.net_weight === undefined) && Number(line.gross_weight || 0) > 0) {
+      line.net_weight = Number((Number(line.gross_weight) * 0.9).toFixed(3));
+      line.net_weight_method = "default_90_percent_of_gross";
     }
   });
   renderItems();
@@ -824,12 +909,16 @@ function renderCalc() {
   const totalGross = state.current.packing_lines.reduce((sum, line) => sum + Number(line.gross_weight || 0), 0);
   const totalNet = state.current.packing_lines.reduce((sum, line) => sum + Number(line.net_weight || 0), 0);
   const totalCbm = state.current.packing_lines.reduce((sum, line) => sum + Number(line.cbm || 0), 0);
+  const blGross = sourceTotalNumber(state.current.bl_totals, "gross_weight");
+  const blCbm = sourceTotalNumber(state.current.bl_totals, "cbm");
+  const grossDisplay = blGross === null ? money(totalGross) : state.current.bl_totals.gross_weight_display || blGross;
+  const cbmDisplay = blCbm === null ? (totalCbm ? money(totalCbm) : "待补") : state.current.bl_totals.cbm_display || blCbm;
   grid.innerHTML = `
     <div class="summary-item"><div class="summary-label">Quantity</div><div class="summary-value">${totalQty}</div></div>
     <div class="summary-item"><div class="summary-label">PKG</div><div class="summary-value">${totalPkg || "待补"}</div></div>
-    <div class="summary-item"><div class="summary-label">G.W.</div><div class="summary-value">${money(totalGross)} KGS</div></div>
+    <div class="summary-item"><div class="summary-label">G.W.${blGross === null ? "" : "（提单）"}</div><div class="summary-value">${grossDisplay} KGS</div></div>
     <div class="summary-item"><div class="summary-label">N.W.</div><div class="summary-value">${money(totalNet)} KGS</div></div>
-    <div class="summary-item"><div class="summary-label">CBM</div><div class="summary-value">${totalCbm ? money(totalCbm) : "待补"}</div></div>
+    <div class="summary-item"><div class="summary-label">CBM${blCbm === null ? "" : "（提单）"}</div><div class="summary-value">${cbmDisplay}</div></div>
     <div class="summary-item"><div class="summary-label">Total Value</div><div class="summary-value">USD ${money(totalAmount)}</div></div>
   `;
 }
@@ -1079,6 +1168,22 @@ function draftNumberOrBlank(...values) {
   return value === undefined ? "" : draftNumber(value, "");
 }
 
+function normalizeDraftTotals(totals = {}, containers = []) {
+  const containerPackages = containers.reduce((sum, row) => sum + draftNumber(valueFromDraftField(row.packages), 0), 0);
+  const containerGross = containers.reduce((sum, row) => sum + draftNumber(valueFromDraftField(row.gross_weight), 0), 0);
+  const containerCbm = containers.reduce((sum, row) => sum + draftNumber(valueFromDraftField(row.cbm), 0), 0);
+  const grossRaw = firstDefined(valueFromDraftField(totals.gross_weight), containerGross || undefined);
+  const cbmRaw = firstDefined(valueFromDraftField(totals.cbm), containerCbm || undefined);
+  return {
+    packages: draftNumber(firstDefined(valueFromDraftField(totals.packages), containerPackages), 0),
+    gross_weight: grossRaw === undefined ? null : draftNumber(grossRaw, null),
+    gross_weight_display: String(firstDefined(valueFromDraftField(totals.gross_weight_display), valueFromDraftField(containers[0]?.gross_weight_display), typeof grossRaw === "string" ? grossRaw : "") || ""),
+    cbm: cbmRaw === undefined ? null : draftNumber(cbmRaw, null),
+    cbm_display: String(firstDefined(valueFromDraftField(totals.cbm_display), valueFromDraftField(containers[0]?.cbm_display), typeof cbmRaw === "string" ? cbmRaw : "") || ""),
+    source: totals.source || totals.totals_source || "bill_of_lading",
+  };
+}
+
 function normalizeDraftQuantity(record) {
   const sourceQuantity = draftNumber(firstDefined(record.quantity_source, record.source_quantity, record.quantity, 0));
   const sourceUnit = normalizeQuantityUnit(firstDefined(record.quantity_source_unit, record.source_unit, record.unit));
@@ -1133,18 +1238,35 @@ function mapDraftItem(item) {
     quantity_source_unit: quantity.quantity_source_unit,
     piece_length_m: quantity.piece_length_m,
     piece_count_calculated: quantity.piece_count_calculated,
+    source_total_length_m: item.source_total_length_m ?? null,
+    piece_count_source: item.piece_count_source ?? null,
+    pieces_per_package: item.pieces_per_package ?? null,
+    package_count_source: item.package_count_source ?? null,
+    package_count_calculated: item.package_count_calculated ?? null,
+    loose_piece_count: item.loose_piece_count ?? null,
+    set_basis: item.set_basis || "",
+    quantity_calculation_method: item.quantity_calculation_method || "",
+    calculation_breakdown: item.calculation_breakdown || [],
   };
 }
 
 function mapDraftPackingLine(line) {
   const quantity = normalizeDraftQuantity(line);
+  const grossWeight = draftNumberOrBlank(line.gross_weight_calculated, line.gross_weight_source, line.gross_weight);
+  let netWeight = draftNumberOrBlank(line.net_weight_calculated, line.net_weight_source, line.net_weight);
+  let netWeightMethod = line.net_weight_method || "";
+  if (netWeight === "" && Number(grossWeight || 0) > 0) {
+    netWeight = Number((Number(grossWeight) * 0.9).toFixed(3));
+    netWeightMethod = "default_90_percent_of_gross";
+  }
   return {
     description_en: line.description_en || "",
     quantity: quantity.quantity,
     unit: quantity.unit,
     packages: draftNumber(firstDefined(line.packages, 0)),
-    gross_weight: draftNumberOrBlank(line.gross_weight_calculated, line.gross_weight_source, line.gross_weight),
-    net_weight: draftNumberOrBlank(line.net_weight_calculated, line.net_weight_source, line.net_weight),
+    gross_weight: grossWeight,
+    net_weight: netWeight,
+    net_weight_method: netWeightMethod,
     cbm: draftNumberOrBlank(line.cbm_calculated, line.cbm_source, line.cbm),
     hs_code: line.hs_code || "",
     source: [line.method ? `整理稿导入 · ${line.method}` : "整理稿导入", quantitySourceNote(quantity)].filter(Boolean).join(" · "),
@@ -1154,6 +1276,15 @@ function mapDraftPackingLine(line) {
     quantity_source_unit: quantity.quantity_source_unit,
     piece_length_m: quantity.piece_length_m,
     piece_count_calculated: quantity.piece_count_calculated,
+    source_total_length_m: line.source_total_length_m ?? null,
+    piece_count_source: line.piece_count_source ?? null,
+    pieces_per_package: line.pieces_per_package ?? null,
+    package_count_source: line.package_count_source ?? null,
+    package_count_calculated: line.package_count_calculated ?? null,
+    loose_piece_count: line.loose_piece_count ?? null,
+    set_basis: line.set_basis || "",
+    quantity_calculation_method: line.quantity_calculation_method || "",
+    calculation_breakdown: line.calculation_breakdown || [],
   };
 }
 
@@ -1206,6 +1337,7 @@ function applyShipmentGroup(group, index = 0) {
   }
   state.current.items = (group.items || []).map(mapDraftItem);
   state.current.packing_lines = (group.packing_lines || []).map(mapDraftPackingLine);
+  state.current.bl_totals = normalizeDraftTotals(group.totals || {}, group.si?.containers || []);
   state.current.issues = group.issues || [];
   recalculateCurrent();
   renderAll();
@@ -1279,6 +1411,7 @@ function applyDraft(payload) {
   if (draft.packing_lines?.length) {
     state.current.packing_lines = draft.packing_lines.map(mapDraftPackingLine);
   }
+  if (draft.totals) state.current.bl_totals = normalizeDraftTotals(draft.totals, draft.si?.containers || []);
   if (draft.issues) state.current.issues = draft.issues;
   if (draft.shipment_groups?.length === 1) {
     applyShipmentGroup(draft.shipment_groups[0], 0);
