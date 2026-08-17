@@ -406,7 +406,7 @@ async function exportPipkgInBrowser(data) {
     const quantity = Number(item.quantity || 0);
     const unitPrice = Number(item.unit_price || 0);
     const amount = quantity * unitPrice;
-    setWorkbookCell(pi, `A${row}`, item.description_en || "");
+    setWorkbookCell(pi, `A${row}`, [item.description_en, item.hs_code].filter(Boolean).join(" "));
     setWorkbookCell(pi, `C${row}`, quantity);
     setWorkbookCell(pi, `D${row}`, normalizeQuantityUnit(item.unit));
     setWorkbookCell(pi, `E${row}`, unitPrice);
@@ -428,7 +428,7 @@ async function exportPipkgInBrowser(data) {
       F: line.net_weight === "" ? 0 : Number(line.net_weight || 0),
       G: line.cbm === "" ? 0 : Number(line.cbm || 0),
     };
-    setWorkbookCell(pkg, `A${row}`, line.description_en || "");
+    setWorkbookCell(pkg, `A${row}`, [line.description_en, line.hs_code].filter(Boolean).join(" "));
     setWorkbookCell(pkg, `B${row}`, values.B);
     setWorkbookCell(pkg, `C${row}`, normalizeQuantityUnit(line.unit));
     setWorkbookCell(pkg, `D${row}`, values.D);
