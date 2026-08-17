@@ -1664,6 +1664,12 @@ async function scanFolder(folder) {
 async function validateCurrent() {
   if (!state.current) return;
   setStatus("校验中");
+  if (state.remoteMode) {
+    state.current = validateInBrowser(state.current);
+    setStatus("已校验");
+    renderAll();
+    return;
+  }
   try {
     state.current = await api("/api/validate", {
       method: "POST",
@@ -1700,6 +1706,17 @@ async function exportByKind(kind) {
     return;
   }
   setStatus("导出中");
+  if (state.remoteMode) {
+    try {
+      const filename = await exportPipkgInBrowser(state.current);
+      qs("exportBox").innerHTML = `<strong>${filename}</strong><span>文件已在本机浏览器内生成并下载，整理稿数据未上传到服务器。</span>`;
+      setStatus("已导出");
+    } catch (error) {
+      qs("exportBox").innerHTML = `<strong>导出失败</strong><span>${error.message}</span>`;
+      setStatus("导出失败");
+    }
+    return;
+  }
   try {
     const result = await api("/api/export", {
       method: "POST",
