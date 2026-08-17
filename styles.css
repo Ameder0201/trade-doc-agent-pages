@@ -156,6 +156,30 @@ p {
   margin: -14px -14px 14px;
 }
 
+.draft-import-panel {
+  margin-bottom: 14px;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  background: #fbfcfc;
+}
+
+.draft-import-panel summary,
+.reconciliation-panel summary {
+  min-height: 42px;
+  padding: 10px 12px;
+  cursor: pointer;
+  font-size: 14px;
+  font-weight: 700;
+}
+
+.draft-import-panel .import-box {
+  padding: 0 12px 12px;
+}
+
+.draft-import-panel .import-box textarea {
+  min-height: 132px;
+}
+
 .panel-head h2 {
   font-size: 17px;
 }
@@ -381,6 +405,60 @@ p {
   border-bottom: 1px solid var(--line);
 }
 
+.reconciliation-panel {
+  border-bottom: 1px solid var(--line);
+  background: #fbfcfc;
+}
+
+.reconciliation-panel summary {
+  padding-inline: 14px;
+}
+
+.reconciliation-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+  padding: 0 14px 14px;
+}
+
+.reconciliation-card {
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  background: #fff;
+  padding: 10px;
+}
+
+.reconciliation-card.error {
+  border-color: #f0b6af;
+  background: #fff8f7;
+}
+
+.reconciliation-values {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px 12px;
+  margin-top: 10px;
+}
+
+.reconciliation-values span {
+  display: grid;
+  gap: 3px;
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.reconciliation-values strong {
+  color: var(--ink);
+  font-size: 13px;
+  overflow-wrap: anywhere;
+}
+
+.reconciliation-empty {
+  grid-column: 1 / -1;
+  color: var(--muted);
+  font-size: 12px;
+}
+
 .summary-item {
   background: #f9fbfa;
   border: 1px solid var(--line);
@@ -499,22 +577,6 @@ p {
 .price-summary strong {
   color: var(--ink);
   font-size: 16px;
-}
-
-.secondary-action {
-  margin-left: 8px;
-}
-
-.calc-head {
-  display: flex;
-  justify-content: flex-end;
-  margin-bottom: 12px;
-}
-
-.calc-grid {
-  display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
-  gap: 10px;
 }
 
 .import-box {
@@ -668,7 +730,7 @@ td textarea {
   }
 
   .field-grid,
-  .calc-grid {
+  .reconciliation-grid {
     grid-template-columns: 1fr;
   }
 

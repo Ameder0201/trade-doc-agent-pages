@@ -114,6 +114,14 @@ function fieldValue(data, name, fallback = "") {
 }
 
 function extractionIssueIsCurrent(issue, data) {
+  const reconciliationIssueKeys = {
+    cbm_source_difference: "cbm",
+    packing_cbm_differs_from_bl: "cbm",
+    gross_weight_source_difference: "gross_weight",
+    packing_gross_differs_from_bl: "gross_weight",
+  };
+  const reconciliationKey = reconciliationIssueKeys[String(issue.type || "")];
+  if (reconciliationKey && data.packing_reconciliation?.[reconciliationKey]) return false;
   const match = String(issue.field || "").match(/^(items|packing_lines)\[(\d+)\](?:\.|$)/);
   if (!match) return true;
   return Number(match[2]) < (data[match[1]] || []).length;
@@ -129,8 +137,84 @@ function applyDefaultNetWeights(data) {
   });
 }
 
+function decimalPlaces(value) {
+  const text = String(value ?? "").replace(/,/g, "").trim();
+  if (!text) return 0;
+  if (/e-/i.test(text)) return Number(text.split(/e-/i)[1] || 0);
+  return text.includes(".") ? text.split(".").pop().length : 0;
+}
+
+function reconciliationTolerance(key, target) {
+  return Math.max(key === "gross_weight" ? 1 : 0.01, Math.abs(target) * 0.0005);
+}
+
+function reconcilePackingTotals(data, applyAdjustment = true) {
+  const lines = data?.packing_lines || [];
+  const totals = data?.bl_totals || {};
+  if (!data.packing_reconciliation) data.packing_reconciliation = {};
+  const units = { gross_weight: "KGS", cbm: "CBM" };
+
+  ["gross_weight", "cbm"].forEach((key) => {
+    const target = sourceTotalNumber(totals, key);
+    if (target === null) {
+      delete data.packing_reconciliation[key];
+      return;
+    }
+    const values = lines.map((line) => Number(line[key] || 0));
+    const actual = values.reduce((sum, value) => sum + value, 0);
+    const difference = target - actual;
+    const tolerance = reconciliationTolerance(key, target);
+    const rate = target ? Math.abs(difference) / Math.abs(target) * 100 : 0;
+    const previous = data.packing_reconciliation[key];
+
+    if (Math.abs(difference) < 1e-12 && previous?.status === "adjusted" && Math.abs(Number(previous.detail_total_after) - target) < 1e-12) {
+      return;
+    }
+
+    let status = Math.abs(difference) < 1e-12 ? "matched" : "anomaly";
+    let adjustedTotal = actual;
+    if (applyAdjustment && Math.abs(difference) >= 1e-12 && Math.abs(difference) <= tolerance && actual > 0) {
+      const eligible = values.map((value, index) => ({ value, index })).filter(({ value }) => value > 0);
+      if (eligible.length) {
+        const displayPrecision = decimalPlaces(totals[`${key}_display`]);
+        const precision = Math.min(8, Math.max(3, displayPrecision, ...values.map(decimalPlaces)));
+        const factor = 10 ** precision;
+        let assigned = 0;
+        eligible.forEach(({ value, index }, position) => {
+          const adjusted = position === eligible.length - 1
+            ? Number((target - assigned).toFixed(precision))
+            : Math.round((value + difference * value / actual) * factor) / factor;
+          const adjustment = adjusted - value;
+          lines[index][key] = adjusted;
+          lines[index][`${key}_reconciliation_adjustment`] = Number(adjustment.toFixed(precision));
+          if (key === "gross_weight" && lines[index].net_weight_method === "default_90_percent_of_gross") {
+            lines[index].net_weight = Number((adjusted * 0.9).toFixed(3));
+          }
+          assigned += adjusted;
+        });
+        adjustedTotal = lines.reduce((sum, line) => sum + Number(line[key] || 0), 0);
+        status = "adjusted";
+      }
+    }
+
+    data.packing_reconciliation[key] = {
+      status,
+      unit: units[key],
+      detail_total_before: actual,
+      detail_total_after: adjustedTotal,
+      bill_total: target,
+      difference,
+      absolute_difference: Math.abs(difference),
+      error_rate_percent: rate,
+      tolerance,
+    };
+  });
+  return data.packing_reconciliation;
+}
+
 function validateInBrowser(data) {
   applyDefaultNetWeights(data);
+  const reconciliation = reconcilePackingTotals(data, true);
   const issues = (data.issues || []).filter(
     (issue) => (!issue.source || issue.source === "trade-doc-summary-extractor") && extractionIssueIsCurrent(issue, data),
   );
@@ -177,16 +261,16 @@ function validateInBrowser(data) {
       add("warning", "missing_packing_weight", `包装第 ${index + 1} 行缺少毛重，导出前建议人工补录`, `packing_lines[${index}].gross_weight`);
     }
   });
-  const packingGross = (data.packing_lines || []).reduce((sum, line) => sum + Number(line.gross_weight || 0), 0);
-  const packingCbm = (data.packing_lines || []).reduce((sum, line) => sum + Number(line.cbm || 0), 0);
-  const blGross = sourceTotalNumber(data.bl_totals, "gross_weight");
-  const blCbm = sourceTotalNumber(data.bl_totals, "cbm");
-  if (blGross !== null && Math.abs(packingGross - blGross) > 0.0005) {
-    add("warning", "packing_gross_differs_from_bl", `装箱明细毛重 ${packingGross} KGS 与提单 ${data.bl_totals.gross_weight_display || blGross} KGS 不一致；导出总计采用提单值`, "bl_totals.gross_weight");
-  }
-  if (blCbm !== null && Math.abs(packingCbm - blCbm) > 0.0005) {
-    add("warning", "packing_cbm_differs_from_bl", `装箱明细体积 ${packingCbm} CBM 与提单 ${data.bl_totals.cbm_display || blCbm} CBM 不一致；导出总计采用提单值`, "bl_totals.cbm");
-  }
+  const anomalyLabels = { gross_weight: "毛重", cbm: "体积" };
+  Object.entries(reconciliation || {}).forEach(([key, result]) => {
+    if (result.status !== "anomaly") return;
+    add(
+      "warning",
+      `${key}_anomaly`,
+      `${anomalyLabels[key]}异常：装箱明细 ${result.detail_total_before} ${result.unit}，提单 ${result.bill_total} ${result.unit}，绝对差值 ${result.absolute_difference}，误差率 ${result.error_rate_percent.toFixed(4)}%；最终总计仍以提单为准`,
+      `bl_totals.${key}`,
+    );
+  });
   return { ...data, issues };
 }
 
@@ -202,6 +286,53 @@ function clearWorkbookRows(sheet, fromRow, toRow, fromColumn, toColumn) {
       cell.value = null;
     }
   }
+}
+
+function cloneWorkbookStyle(style) {
+  return JSON.parse(JSON.stringify(style || {}));
+}
+
+function copyWorkbookCellStyle(sheet, sourceAddress, targetAddress) {
+  sheet.getCell(targetAddress).style = cloneWorkbookStyle(sheet.getCell(sourceAddress).style);
+}
+
+function preparePipkgTableLayout(pi, pkg) {
+  for (let row = 18; row <= 37; row += 1) {
+    copyWorkbookCellStyle(pi, `F${row}`, `G${row}`);
+    copyWorkbookCellStyle(pi, `E${row}`, `F${row}`);
+    copyWorkbookCellStyle(pi, `D${row}`, `E${row}`);
+  }
+  pi.getColumn("E").width = 10;
+  pi.getColumn("F").width = 14.4;
+  pi.getColumn("G").width = 12.4;
+  setWorkbookCell(pi, "D18", "Quantity");
+  setWorkbookCell(pi, "E18", "UNIT");
+  setWorkbookCell(pi, "F18", "Unit Price");
+  setWorkbookCell(pi, "G18", "Amount\nUSD");
+  setWorkbookCell(pi, "E37", "");
+  setWorkbookCell(pi, "F37", "");
+
+  for (let row = 14; row <= 33; row += 1) {
+    [["H", "I"], ["G", "H"], ["F", "G"], ["E", "F"], ["D", "E"]].forEach(([source, target]) => {
+      copyWorkbookCellStyle(pkg, `${source}${row}`, `${target}${row}`);
+    });
+  }
+  pkg.getColumn("I").width = pkg.getColumn("H").width;
+  pkg.getColumn("H").width = pkg.getColumn("G").width;
+  pkg.getColumn("G").width = pkg.getColumn("F").width;
+  pkg.getColumn("F").width = pkg.getColumn("E").width;
+  pkg.getColumn("E").width = pkg.getColumn("D").width;
+  pkg.getColumn("D").width = 10;
+  setWorkbookCell(pkg, "C14", "QUANTITY");
+  setWorkbookCell(pkg, "D14", "UNIT");
+  setWorkbookCell(pkg, "E14", "PKG");
+  setWorkbookCell(pkg, "F14", "G.W.(KGS)");
+  setWorkbookCell(pkg, "G14", "N.W.(KGS)");
+  setWorkbookCell(pkg, "H14", "TTL CBM");
+  setWorkbookCell(pkg, "I14", "HS CODE");
+  setWorkbookCell(pkg, "D33", "");
+  setWorkbookCell(pkg, "I33", "");
+  pkg.pageSetup.printArea = "A1:I35";
 }
 
 function deliveryAndPaymentText(data) {
@@ -229,6 +360,8 @@ function sourceNumberFormat(display, fallbackDecimals = 3) {
 
 async function exportPipkgInBrowser(data) {
   if (!window.ExcelJS) throw new Error("Excel 导出组件未加载");
+  applyDefaultNetWeights(data);
+  reconcilePackingTotals(data, true);
   const templateResponse = await fetch("../templates/FT0126021101样例.xlsx");
   if (!templateResponse.ok) throw new Error("无法读取 PIPKG 模板");
   const workbook = new window.ExcelJS.Workbook();
@@ -236,6 +369,7 @@ async function exportPipkgInBrowser(data) {
   const pi = workbook.getWorksheet("PI");
   const pkg = workbook.getWorksheet("PKG");
   if (!pi || !pkg) throw new Error("PIPKG 模板缺少 PI 或 PKG 工作表");
+  preparePipkgTableLayout(pi, pkg);
   const caseNo = data.case?.case_no || fieldValue(data, "invoice_no", "UNNAMED");
   [pi, pkg].forEach((sheet) => setWorkbookCell(sheet, "C7", caseNo));
   setWorkbookCell(pi, "E7", fieldValue(data, "invoice_date"));
@@ -254,8 +388,7 @@ async function exportPipkgInBrowser(data) {
   setWorkbookCell(pi, "C15", paymentText);
   setWorkbookCell(pkg, "C11", paymentText);
   clearWorkbookRows(pi, 19, 34, 1, 7);
-  clearWorkbookRows(pkg, 15, 32, 1, 8);
-  setWorkbookCell(pi, "G18", "UNIT");
+  clearWorkbookRows(pkg, 15, 32, 1, 9);
   const items = (data.items || []).slice(0, 16);
   let totalQuantity = 0;
   let totalAmount = 0;
@@ -266,47 +399,48 @@ async function exportPipkgInBrowser(data) {
     const amount = quantity * unitPrice;
     setWorkbookCell(pi, `A${row}`, item.description_en || "");
     setWorkbookCell(pi, `D${row}`, quantity);
-    setWorkbookCell(pi, `E${row}`, unitPrice);
-    pi.getCell(`F${row}`).value = { formula: `D${row}*E${row}`, result: amount };
-    pi.getCell(`F${row}`).numFmt = "#,##0.00";
-    setWorkbookCell(pi, `G${row}`, normalizeQuantityUnit(item.unit));
+    setWorkbookCell(pi, `E${row}`, normalizeQuantityUnit(item.unit));
+    setWorkbookCell(pi, `F${row}`, unitPrice);
+    pi.getCell(`G${row}`).value = { formula: `D${row}*F${row}`, result: amount };
+    pi.getCell(`G${row}`).numFmt = "#,##0.00";
     totalQuantity += quantity;
     totalAmount += amount;
   });
   const packing = (data.packing_lines || []).length
     ? data.packing_lines
     : (data.items || []).map((item) => ({ ...item, packages: "", gross_weight: "", net_weight: "", cbm: "" }));
-  const packingTotals = { C: 0, D: 0, E: 0, F: 0, G: 0 };
+  const packingTotals = { C: 0, E: 0, F: 0, G: 0, H: 0 };
   packing.slice(0, 18).forEach((line, index) => {
     const row = 15 + index;
     const values = {
       C: Number(line.quantity || 0),
-      D: Number(line.packages || 0),
-      E: line.gross_weight === "" ? 0 : Number(line.gross_weight || 0),
-      F: line.net_weight === "" ? 0 : Number(line.net_weight || 0),
-      G: line.cbm === "" ? 0 : Number(line.cbm || 0),
+      E: Number(line.packages || 0),
+      F: line.gross_weight === "" ? 0 : Number(line.gross_weight || 0),
+      G: line.net_weight === "" ? 0 : Number(line.net_weight || 0),
+      H: line.cbm === "" ? 0 : Number(line.cbm || 0),
     };
-    setWorkbookCell(pkg, `A${row}`, `${line.description_en || ""} ${line.hs_code || ""}`.trim());
+    setWorkbookCell(pkg, `A${row}`, line.description_en || "");
     setWorkbookCell(pkg, `C${row}`, values.C);
-    setWorkbookCell(pkg, `D${row}`, values.D);
-    setWorkbookCell(pkg, `E${row}`, line.gross_weight === "" ? "" : values.E);
-    setWorkbookCell(pkg, `F${row}`, line.net_weight === "" ? "" : values.F);
-    setWorkbookCell(pkg, `G${row}`, line.cbm === "" ? "" : values.G);
-    setWorkbookCell(pkg, `H${row}`, line.hs_code || "");
+    setWorkbookCell(pkg, `D${row}`, normalizeQuantityUnit(line.unit));
+    setWorkbookCell(pkg, `E${row}`, values.E);
+    setWorkbookCell(pkg, `F${row}`, line.gross_weight === "" ? "" : values.F);
+    setWorkbookCell(pkg, `G${row}`, line.net_weight === "" ? "" : values.G);
+    setWorkbookCell(pkg, `H${row}`, line.cbm === "" ? "" : values.H);
+    setWorkbookCell(pkg, `I${row}`, line.hs_code || "");
     Object.keys(packingTotals).forEach((column) => {
       packingTotals[column] += values[column];
     });
   });
   pi.getCell("D37").value = { formula: "SUM(D19:D34)", result: totalQuantity };
-  pi.getCell("F37").value = { formula: "SUM(F19:F34)", result: totalAmount };
-  pi.getCell("F37").numFmt = "#,##0.00";
+  pi.getCell("G37").value = { formula: "SUM(G19:G34)", result: totalAmount };
+  pi.getCell("G37").numFmt = "#,##0.00";
   const blGrossWeight = sourceTotalNumber(data.bl_totals, "gross_weight");
   const blCbm = sourceTotalNumber(data.bl_totals, "cbm");
   Object.entries(packingTotals).forEach(([column, result]) => {
-    const sourceValue = column === "E" ? blGrossWeight : column === "G" ? blCbm : null;
+    const sourceValue = column === "F" ? blGrossWeight : column === "H" ? blCbm : null;
     if (sourceValue !== null) {
       setWorkbookCell(pkg, `${column}33`, sourceValue);
-      const key = column === "E" ? "gross_weight" : "cbm";
+      const key = column === "F" ? "gross_weight" : "cbm";
       pkg.getCell(`${column}33`).numFmt = sourceNumberFormat(data.bl_totals?.[`${key}_display`]);
       return;
     }
@@ -766,11 +900,13 @@ function bindTableInputs(tableName) {
           amountInput.value = item.amount ? Number(item.amount.toFixed(2)) : "";
         }
         renderPriceSummary();
-        renderCalc();
       }
       if (tableName === "items" && key === "amount") {
         renderPriceSummary();
-        renderCalc();
+      }
+      if (tableName === "packing_lines" && ["gross_weight", "cbm"].includes(key)) {
+        delete state.current.packing_reconciliation?.[key];
+        renderReconciliation();
       }
       renderSummary();
     });
@@ -786,7 +922,7 @@ function deleteTableRow(tableName, rowIndex) {
   } else {
     renderPacking();
   }
-  renderCalc();
+  renderReconciliation();
   renderSummary();
   renderIssues();
 }
@@ -869,7 +1005,6 @@ function renderPacking() {
     .join("");
   bindTableInputs("packing_lines");
   bindDeleteRows("packing_lines");
-  renderCalc();
 }
 
 function recalculateCurrent() {
@@ -890,37 +1025,69 @@ function recalculateCurrent() {
       line.net_weight_method = "default_90_percent_of_gross";
     }
   });
+  reconcilePackingTotals(state.current, true);
   renderItems();
   renderPacking();
   renderSummary();
+  renderReconciliation();
 }
 
-function renderCalc() {
-  const grid = qs("calcGrid");
-  if (!grid || !state.current) return;
-  const totalAmount = state.current.items.reduce((sum, item) => sum + Number(item.amount || 0), 0);
-  const quantityTotals = state.current.items.reduce((totals, item) => {
-    const unit = normalizeQuantityUnit(item.unit);
-    totals[unit] = (totals[unit] || 0) + Number(item.quantity || 0);
-    return totals;
-  }, {});
-  const totalQty = Object.entries(quantityTotals).map(([unit, value]) => `${money(value)} ${unit}`).join(" / ") || "待补";
-  const totalPkg = state.current.packing_lines.reduce((sum, line) => sum + Number(line.packages || 0), 0);
-  const totalGross = state.current.packing_lines.reduce((sum, line) => sum + Number(line.gross_weight || 0), 0);
-  const totalNet = state.current.packing_lines.reduce((sum, line) => sum + Number(line.net_weight || 0), 0);
-  const totalCbm = state.current.packing_lines.reduce((sum, line) => sum + Number(line.cbm || 0), 0);
-  const blGross = sourceTotalNumber(state.current.bl_totals, "gross_weight");
-  const blCbm = sourceTotalNumber(state.current.bl_totals, "cbm");
-  const grossDisplay = blGross === null ? money(totalGross) : state.current.bl_totals.gross_weight_display || blGross;
-  const cbmDisplay = blCbm === null ? (totalCbm ? money(totalCbm) : "待补") : state.current.bl_totals.cbm_display || blCbm;
-  grid.innerHTML = `
-    <div class="summary-item"><div class="summary-label">Quantity</div><div class="summary-value">${totalQty}</div></div>
-    <div class="summary-item"><div class="summary-label">PKG</div><div class="summary-value">${totalPkg || "待补"}</div></div>
-    <div class="summary-item"><div class="summary-label">G.W.${blGross === null ? "" : "（提单）"}</div><div class="summary-value">${grossDisplay} KGS</div></div>
-    <div class="summary-item"><div class="summary-label">N.W.</div><div class="summary-value">${money(totalNet)} KGS</div></div>
-    <div class="summary-item"><div class="summary-label">CBM${blCbm === null ? "" : "（提单）"}</div><div class="summary-value">${cbmDisplay}</div></div>
-    <div class="summary-item"><div class="summary-label">Total Value</div><div class="summary-value">USD ${money(totalAmount)}</div></div>
-  `;
+function reconciliationSnapshot(data, key) {
+  const target = sourceTotalNumber(data?.bl_totals, key);
+  if (target === null) return null;
+  const currentTotal = (data.packing_lines || []).reduce((sum, line) => sum + Number(line[key] || 0), 0);
+  const saved = data.packing_reconciliation?.[key];
+  if (saved?.status === "adjusted" && Math.abs(currentTotal - target) < 1e-9) return saved;
+  const difference = target - currentTotal;
+  const absoluteDifference = Math.abs(difference);
+  const tolerance = reconciliationTolerance(key, target);
+  return {
+    status: absoluteDifference < 1e-9 ? "matched" : absoluteDifference <= tolerance ? "within_tolerance" : "anomaly",
+    unit: key === "gross_weight" ? "KGS" : "CBM",
+    detail_total_before: currentTotal,
+    detail_total_after: currentTotal,
+    bill_total: target,
+    difference,
+    absolute_difference: absoluteDifference,
+    error_rate_percent: target ? absoluteDifference / Math.abs(target) * 100 : 0,
+    tolerance,
+  };
+}
+
+function reconciliationNumber(value, decimals = 8) {
+  const number = Number(value || 0);
+  return number.toLocaleString("en-US", { maximumFractionDigits: decimals });
+}
+
+function renderReconciliation() {
+  const grid = qs("reconciliationGrid");
+  if (!grid) return;
+  if (!state.current) {
+    grid.innerHTML = `<div class="reconciliation-empty">导入整理稿后显示毛重和体积核对。</div>`;
+    return;
+  }
+  const labels = { gross_weight: "毛重", cbm: "体积" };
+  const statusLabels = { matched: "一致", adjusted: "已平差", within_tolerance: "可平差", anomaly: "异常" };
+  grid.innerHTML = ["gross_weight", "cbm"].map((key) => {
+    const result = reconciliationSnapshot(state.current, key);
+    if (!result) {
+      return `<div class="reconciliation-card"><div class="card-title"><span>${labels[key]}</span><span class="tag medium">缺少提单值</span></div></div>`;
+    }
+    const display = state.current.bl_totals?.[`${key}_display`] || reconciliationNumber(result.bill_total);
+    const statusClass = result.status === "anomaly" ? "error" : result.status === "adjusted" || result.status === "matched" ? "high" : "medium";
+    return `
+      <div class="reconciliation-card ${result.status === "anomaly" ? "error" : ""}">
+        <div class="card-title"><span>${labels[key]}</span><span class="tag ${statusClass}">${statusLabels[result.status]}</span></div>
+        <div class="reconciliation-values">
+          <span>明细计算<strong>${reconciliationNumber(result.detail_total_before)} ${result.unit}</strong></span>
+          <span>提单数值<strong>${display} ${result.unit}</strong></span>
+          <span>绝对差值<strong>${reconciliationNumber(result.absolute_difference)} ${result.unit}</strong></span>
+          <span>误差率<strong>${Number(result.error_rate_percent || 0).toFixed(4)}%</strong></span>
+          ${result.status === "adjusted" ? `<span>平差后<strong>${reconciliationNumber(result.detail_total_after)} ${result.unit}</strong></span>` : ""}
+        </div>
+      </div>
+    `;
+  }).join("");
 }
 
 function renderGroups() {
@@ -1018,7 +1185,7 @@ function issueTab(issue) {
   const fieldName = normalizedIssueField(rawFieldName);
   const issueType = String(issue?.type || "");
   if (fieldName.startsWith("items") || issueType === "missing_items" || issueType === "amount_mismatch") return "items";
-  if (fieldName.startsWith("packing_lines") || issueType.startsWith("missing_packing")) return "packing";
+  if (fieldName.startsWith("packing_lines") || issueType.startsWith("missing_packing") || issueType.endsWith("_anomaly")) return "packing";
   if (["shipment_groups", "assigned_sources", "active_group_id"].includes(fieldName) || issueType === "multiple_bill_of_lading") return "groups";
   if (siFields.includes(fieldName) || fieldName.startsWith("si.")) return "si";
   if (fixedFields.includes(fieldName) || rawFieldName.endsWith("__conflict")) return "fields";
@@ -1026,6 +1193,10 @@ function issueTab(issue) {
 }
 
 function issueTarget(issue, tabName) {
+  if (String(issue?.type || "").endsWith("_anomaly")) {
+    qs("reconciliationPanel").open = true;
+    return qs("reconciliationPanel");
+  }
   const fieldName = normalizedIssueField(issue?.field);
   const tableName = tabName === "items" ? "items" : tabName === "packing" ? "packing_lines" : "";
   if (tableName) {
@@ -1063,21 +1234,6 @@ function navigateToIssue(issue) {
     if (target.matches("input, textarea, select, button")) target.focus({ preventScroll: true });
     window.setTimeout(() => highlight.classList.remove("issue-target"), 2400);
   });
-}
-
-function renderSkills() {
-  const list = qs("skillList");
-  list.innerHTML = (state.current?.skill_trace || [])
-    .map((item) => `
-      <div class="skill-card">
-        <div class="card-title">
-          <span>${item.skill}</span>
-          <span class="tag ${item.status === "success" ? "high" : "medium"}">${item.status}</span>
-        </div>
-        <div class="card-meta">${item.message}</div>
-      </div>
-    `)
-    .join("");
 }
 
 function extractJsonFromText(text) {
@@ -1432,7 +1588,7 @@ async function importDraft() {
     const groupCount = payload.shipment_groups?.length || 0;
     qs("importStatus").textContent = groupCount > 1
       ? `已导入整理稿：识别到 ${groupCount} 个提单组，请在“拆单”页选择要核验的提单。`
-      : "已导入整理稿，已刷新 PIPKG / SI / 商品 / 包装 / 计算页。";
+      : "已导入整理稿，已刷新基础信息、PI、PKG 和提单差异核对。";
   } catch (error) {
     qs("importStatus").textContent = `导入失败：${error.message}`;
   }
@@ -1447,9 +1603,8 @@ function renderAll() {
   renderSiFields();
   renderItems();
   renderPacking();
-  renderCalc();
+  renderReconciliation();
   renderIssues();
-  renderSkills();
 }
 
 async function loadCases() {
@@ -1467,7 +1622,7 @@ async function loadCases() {
     qs("folderInput").disabled = true;
     qs("scanButton").disabled = true;
     setStatus("远程模式");
-    openTab("import");
+    qs("draftImportPanel").open = true;
   }
   renderCases();
 }
@@ -1622,7 +1777,6 @@ function bindActions() {
   });
   qs("addItem").addEventListener("click", addItem);
   qs("addPacking").addEventListener("click", addPacking);
-  qs("recalculateButton").addEventListener("click", recalculateCurrent);
   qs("importDraftButton").addEventListener("click", importDraft);
   qs("draftFile").addEventListener("change", async (event) => {
     const file = event.target.files?.[0];

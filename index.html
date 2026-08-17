@@ -21,6 +21,17 @@
             <h2>资料</h2>
             <button class="icon-button" id="refreshCases" title="刷新资料目录" aria-label="刷新资料目录">↻</button>
           </div>
+          <details class="draft-import-panel" id="draftImportPanel">
+            <summary>整理稿导入</summary>
+            <div class="import-box">
+              <label class="input-label" for="draftFile">上传整理稿 JSON 文件</label>
+              <input id="draftFile" type="file" accept=".json,.txt,.md" />
+              <label class="input-label" for="draftText">或粘贴整理稿 JSON</label>
+              <textarea id="draftText" placeholder="粘贴 trade-doc-summary-extractor 输出的 JSON"></textarea>
+              <button id="importDraftButton">导入整理稿</button>
+              <div class="source-note" id="importStatus">支持 shipment_groups、fields、items 和 packing_lines。</div>
+            </div>
+          </details>
           <label class="input-label" for="folderInput">资料目录</label>
           <div class="path-row">
             <input id="folderInput" type="text" />
@@ -49,15 +60,17 @@
 
           <div class="summary-grid" id="caseSummary"></div>
 
+          <details class="reconciliation-panel" id="reconciliationPanel" open>
+            <summary>提单差异核对</summary>
+            <div class="reconciliation-grid" id="reconciliationGrid"></div>
+          </details>
+
           <div class="tabs" role="tablist">
             <button class="tab" data-tab="groups">拆单</button>
             <button class="tab active" data-tab="fields">基础信息</button>
             <button class="tab" data-tab="si">SI</button>
             <button class="tab" data-tab="items">PI</button>
             <button class="tab" data-tab="packing">PKG</button>
-            <button class="tab" data-tab="calc">计算</button>
-            <button class="tab" data-tab="import">整理稿导入</button>
-            <button class="tab" data-tab="skills">Skills</button>
           </div>
 
           <div class="tab-panel active" id="tab-fields">
@@ -92,7 +105,6 @@
               </table>
             </div>
             <button id="addItem">+ 商品行</button>
-            <button class="secondary-action" data-open-tab="calc">计算流程</button>
           </div>
 
           <div class="tab-panel" id="tab-packing">
@@ -115,29 +127,6 @@
               </table>
             </div>
             <button id="addPacking">+ 包装行</button>
-            <button class="secondary-action" data-open-tab="calc">计算流程</button>
-          </div>
-
-          <div class="tab-panel" id="tab-calc">
-            <div class="calc-head">
-              <button id="recalculateButton">重新计算</button>
-            </div>
-            <div class="calc-grid" id="calcGrid"></div>
-          </div>
-
-          <div class="tab-panel" id="tab-import">
-            <div class="import-box">
-              <label class="input-label" for="draftFile">上传整理稿 JSON 文件</label>
-              <input id="draftFile" type="file" accept=".json,.txt,.md" />
-              <label class="input-label" for="draftText">或粘贴 skill 输出的 JSON/整理稿</label>
-              <textarea id="draftText" placeholder="粘贴 $trade-doc-summary-extractor 输出的 JSON block"></textarea>
-              <button id="importDraftButton">导入整理稿</button>
-              <div class="source-note" id="importStatus">支持直接导入整理后的 shipment_groups / fields / items / packing_lines。</div>
-            </div>
-          </div>
-
-          <div class="tab-panel" id="tab-skills">
-            <div class="skill-list" id="skillList"></div>
           </div>
         </section>
 
@@ -154,6 +143,6 @@
       </section>
     </main>
     <script src="./exceljs.min.js"></script>
-    <script src="./main.js?v=20260817-unit-bl-totals"></script>
+    <script src="./main.js?v=20260817-reconciliation-layout"></script>
   </body>
 </html>
