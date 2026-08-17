@@ -19,28 +19,49 @@
         <aside class="panel source-panel">
           <div class="panel-head">
             <h2>资料</h2>
-            <button class="icon-button" id="refreshCases" title="刷新资料目录" aria-label="刷新资料目录">↻</button>
-          </div>
-          <details class="draft-import-panel" id="draftImportPanel">
-            <summary>整理稿导入</summary>
-            <div class="import-box">
-              <label class="input-label" for="draftFile">上传整理稿 JSON 文件</label>
-              <input id="draftFile" type="file" accept=".json,.txt,.md" />
-              <label class="input-label" for="draftText">或粘贴整理稿 JSON</label>
-              <textarea id="draftText" placeholder="粘贴 trade-doc-summary-extractor 输出的 JSON"></textarea>
-              <button id="importDraftButton">导入整理稿</button>
-              <div class="source-note" id="importStatus">支持 shipment_groups、fields、items 和 packing_lines。</div>
+            <div class="button-group">
+              <button class="icon-button" id="refreshCases" title="刷新资料目录" aria-label="刷新资料目录">↻</button>
+              <button class="icon-button sidebar-toggle" id="toggleSidebar" title="收起资料栏" aria-label="收起资料栏">‹</button>
             </div>
-          </details>
-          <label class="input-label" for="folderInput">资料目录</label>
-          <div class="path-row">
-            <input id="folderInput" type="text" />
-            <button id="scanButton">扫描</button>
           </div>
-          <div class="case-list" id="caseList"></div>
+          <nav class="source-nav" aria-label="资料栏">
+            <button class="source-nav-button active" type="button" data-source-view="import">导入</button>
+            <button class="source-nav-button" type="button" data-source-view="history">
+              历史
+              <span class="source-nav-count" id="historyCount">0</span>
+            </button>
+          </nav>
 
-          <h3>文件分类</h3>
-          <div class="file-list" id="fileList"></div>
+          <div class="source-view active" id="sourceViewImport">
+            <details class="draft-import-panel" id="draftImportPanel">
+              <summary>整理稿导入</summary>
+              <div class="import-box">
+                <label class="input-label" for="draftFile">上传整理稿 JSON 文件</label>
+                <input id="draftFile" type="file" accept=".json,.txt,.md" />
+                <label class="input-label" for="draftText">或粘贴整理稿 JSON</label>
+                <textarea id="draftText" placeholder="粘贴 trade-doc-summary-extractor 输出的 JSON"></textarea>
+                <button id="importDraftButton">导入整理稿</button>
+                <div class="source-note" id="importStatus">支持 shipment_groups、fields、items 和 packing_lines。</div>
+              </div>
+            </details>
+            <label class="input-label" for="folderInput">资料目录</label>
+            <div class="path-row">
+              <input id="folderInput" type="text" />
+              <button id="scanButton">扫描</button>
+            </div>
+            <div class="case-list" id="caseList"></div>
+
+            <h3>文件分类</h3>
+            <div class="file-list" id="fileList"></div>
+          </div>
+
+          <div class="source-view" id="sourceViewHistory">
+            <div class="history-toolbar">
+              <input id="historySearch" type="search" placeholder="搜索单号或文件名" aria-label="搜索历史" />
+              <button id="clearHistoryButton" type="button">清空</button>
+            </div>
+            <div class="history-list" id="historyList"></div>
+          </div>
         </aside>
 
         <section class="panel review-panel">
@@ -143,6 +164,6 @@
       </section>
     </main>
     <script src="./exceljs.min.js"></script>
-    <script src="./main.js?v=20260817-github-pages-local-processing"></script>
+    <script src="./main.js?v=20260817-draft-history-sidebar"></script>
   </body>
 </html>

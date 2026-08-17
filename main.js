@@ -4,7 +4,15 @@ const state = {
   current: null,
   activeGroupIndex: -1,
   remoteMode: false,
+  draftHistory: [],
+  draftFileName: "",
+  historyQuery: "",
 };
+
+const draftHistoryDbName = "trade-doc-agent";
+const draftHistoryStoreName = "draft-history";
+const draftHistoryLimit = 50;
+let draftHistoryDbPromise;
 
 const fallbackKnowledge = {
   companies: [
@@ -95,6 +103,277 @@ const siFields = [
 
 function qs(id) {
   return document.getElementById(id);
+}
+
+function openDraftHistoryDb() {
+  if (!window.indexedDB) return Promise.reject(new Error("当前浏览器不支持本地历史存储"));
+  if (draftHistoryDbPromise) return draftHistoryDbPromise;
+  draftHistoryDbPromise = new Promise((resolve, reject) => {
+    const request = window.indexedDB.open(draftHistoryDbName, 1);
+    request.onupgradeneeded = () => {
+      const db = request.result;
+      if (!db.objectStoreNames.contains(draftHistoryStoreName)) {
+        db.createObjectStore(draftHistoryStoreName, { keyPath: "id" });
+      }
+    };
+    request.onsuccess = () => resolve(request.result);
+    request.onerror = () => reject(request.error || new Error("无法打开本地历史"));
+  });
+  return draftHistoryDbPromise;
+}
+
+function historyRequest(request) {
+  return new Promise((resolve, reject) => {
+    request.onsuccess = () => resolve(request.result);
+    request.onerror = () => reject(request.error || new Error("本地历史操作失败"));
+  });
+}
+
+async function readDraftHistory() {
+  const db = await openDraftHistoryDb();
+  const transaction = db.transaction(draftHistoryStoreName, "readonly");
+  return historyRequest(transaction.objectStore(draftHistoryStoreName).getAll());
+}
+
+async function getDraftHistoryRecord(id) {
+  const db = await openDraftHistoryDb();
+  const transaction = db.transaction(draftHistoryStoreName, "readonly");
+  return historyRequest(transaction.objectStore(draftHistoryStoreName).get(id));
+}
+
+async function writeDraftHistoryRecord(record) {
+  const db = await openDraftHistoryDb();
+  return new Promise((resolve, reject) => {
+    const transaction = db.transaction(draftHistoryStoreName, "readwrite");
+    transaction.objectStore(draftHistoryStoreName).put(record);
+    transaction.oncomplete = () => resolve(record);
+    transaction.onerror = () => reject(transaction.error || new Error("无法保存本地历史"));
+    transaction.onabort = () => reject(transaction.error || new Error("本地历史保存已中止"));
+  });
+}
+
+async function removeDraftHistoryRecords(ids) {
+  if (!ids.length) return;
+  const db = await openDraftHistoryDb();
+  await new Promise((resolve, reject) => {
+    const transaction = db.transaction(draftHistoryStoreName, "readwrite");
+    const store = transaction.objectStore(draftHistoryStoreName);
+    ids.forEach((id) => store.delete(id));
+    transaction.oncomplete = () => resolve();
+    transaction.onerror = () => reject(transaction.error || new Error("无法删除本地历史"));
+    transaction.onabort = () => reject(transaction.error || new Error("本地历史删除已中止"));
+  });
+}
+
+async function draftHistoryId(payload) {
+  const text = JSON.stringify(payload);
+  if (window.crypto?.subtle && window.TextEncoder) {
+    const digest = await window.crypto.subtle.digest("SHA-256", new TextEncoder().encode(text));
+    return [...new Uint8Array(digest)].map((byte) => byte.toString(16).padStart(2, "0")).join("");
+  }
+  let hash = 2166136261;
+  for (let index = 0; index < text.length; index += 1) {
+    hash ^= text.charCodeAt(index);
+    hash = Math.imul(hash, 16777619);
+  }
+  return `draft-${(hash >>> 0).toString(16)}`;
+}
+
+function draftHistoryMetadata(payload) {
+  const groups = Array.isArray(payload.shipment_groups) ? payload.shipment_groups : [];
+  const firstGroup = groups[0] || {};
+  const caseNo = String(firstDefined(
+    valueFromDraftField(payload.fields?.invoice_no),
+    valueFromDraftField(firstGroup.invoice_no),
+    payload.case_no,
+    valueFromDraftField(firstGroup.bill_of_lading_no),
+    "未命名整理稿",
+  ));
+  const itemCount = groups.length
+    ? groups.reduce((sum, group) => sum + (group.items || []).length, 0)
+    : (payload.items || []).length;
+  return {
+    caseNo,
+    groupCount: groups.length || 1,
+    itemCount,
+  };
+}
+
+async function saveDraftHistory(rawText, payload, sourceName) {
+  const id = await draftHistoryId(payload);
+  const existing = await getDraftHistoryRecord(id);
+  const now = new Date().toISOString();
+  const record = {
+    ...existing,
+    ...draftHistoryMetadata(payload),
+    id,
+    rawText: rawText.trim(),
+    sourceName: sourceName || "粘贴导入",
+    createdAt: existing?.createdAt || now,
+    lastUsedAt: now,
+  };
+  await writeDraftHistoryRecord(record);
+  const records = (await readDraftHistory()).sort((left, right) => String(right.lastUsedAt).localeCompare(String(left.lastUsedAt)));
+  if (records.length > draftHistoryLimit) {
+    await removeDraftHistoryRecords(records.slice(draftHistoryLimit).map((item) => item.id));
+  }
+  await refreshDraftHistory();
+  return record;
+}
+
+function historyTime(value) {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return "";
+  return new Intl.DateTimeFormat("zh-CN", {
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    hour12: false,
+  }).format(date);
+}
+
+function renderDraftHistory() {
+  const list = qs("historyList");
+  if (!list) return;
+  const query = state.historyQuery.trim().toLowerCase();
+  const records = state.draftHistory.filter((record) => (
+    !query
+    || String(record.caseNo || "").toLowerCase().includes(query)
+    || String(record.sourceName || "").toLowerCase().includes(query)
+  ));
+  qs("historyCount").textContent = String(state.draftHistory.length);
+  list.replaceChildren();
+  if (!records.length) {
+    const empty = document.createElement("div");
+    empty.className = "history-empty";
+    empty.textContent = query ? "未找到匹配记录" : "暂无 JSON 导入历史";
+    list.append(empty);
+    return;
+  }
+  records.forEach((record) => {
+    const card = document.createElement("article");
+    card.className = "history-card";
+    const title = document.createElement("div");
+    title.className = "history-card-title";
+    const strong = document.createElement("strong");
+    strong.textContent = record.caseNo || "未命名整理稿";
+    const time = document.createElement("span");
+    time.className = "history-card-time";
+    time.textContent = historyTime(record.lastUsedAt);
+    title.append(strong, time);
+
+    const source = document.createElement("div");
+    source.className = "history-card-source";
+    source.textContent = record.sourceName || "粘贴导入";
+
+    const stats = document.createElement("div");
+    stats.className = "history-card-stats";
+    [`提单组 ${record.groupCount || 1}`, `商品 ${record.itemCount || 0}`].forEach((label) => {
+      const span = document.createElement("span");
+      span.textContent = label;
+      stats.append(span);
+    });
+
+    const actions = document.createElement("div");
+    actions.className = "history-card-actions";
+    const loadButton = document.createElement("button");
+    loadButton.type = "button";
+    loadButton.textContent = "载入";
+    loadButton.addEventListener("click", () => loadDraftFromHistory(record.id));
+    const deleteButton = document.createElement("button");
+    deleteButton.type = "button";
+    deleteButton.className = "history-delete-button";
+    deleteButton.textContent = "删除";
+    deleteButton.addEventListener("click", () => deleteDraftFromHistory(record.id));
+    actions.append(loadButton, deleteButton);
+    card.append(title, source, stats, actions);
+    list.append(card);
+  });
+}
+
+async function refreshDraftHistory() {
+  try {
+    state.draftHistory = (await readDraftHistory()).sort((left, right) => String(right.lastUsedAt).localeCompare(String(left.lastUsedAt)));
+  } catch {
+    state.draftHistory = [];
+  }
+  renderDraftHistory();
+}
+
+function setSourceView(view) {
+  const selected = view === "history" ? "history" : "import";
+  document.querySelectorAll("[data-source-view]").forEach((button) => {
+    button.classList.toggle("active", button.dataset.sourceView === selected);
+  });
+  qs("sourceViewImport").classList.toggle("active", selected === "import");
+  qs("sourceViewHistory").classList.toggle("active", selected === "history");
+  try {
+    window.localStorage.setItem("tradeDocSourceView", selected);
+  } catch {
+    // The sidebar still works when browser storage is unavailable.
+  }
+}
+
+function restoreSidebarState() {
+  try {
+    document.body.classList.toggle("sidebar-collapsed", window.localStorage.getItem("tradeDocSidebarCollapsed") === "true");
+    setSourceView(window.localStorage.getItem("tradeDocSourceView") || "import");
+  } catch {
+    setSourceView("import");
+  }
+  updateSidebarToggle();
+}
+
+function updateSidebarToggle() {
+  const collapsed = document.body.classList.contains("sidebar-collapsed");
+  const button = qs("toggleSidebar");
+  button.textContent = collapsed ? "›" : "‹";
+  button.title = collapsed ? "展开资料栏" : "收起资料栏";
+  button.setAttribute("aria-label", button.title);
+}
+
+function toggleSidebar() {
+  const collapsed = document.body.classList.toggle("sidebar-collapsed");
+  try {
+    window.localStorage.setItem("tradeDocSidebarCollapsed", String(collapsed));
+  } catch {
+    // Collapsing remains available for the current page when storage is unavailable.
+  }
+  updateSidebarToggle();
+}
+
+async function loadDraftFromHistory(id) {
+  const record = state.draftHistory.find((item) => item.id === id) || await getDraftHistoryRecord(id);
+  if (!record) return;
+  try {
+    const payload = extractJsonFromText(record.rawText);
+    state.draftFileName = record.sourceName || "";
+    qs("draftText").value = record.rawText;
+    applyDraft(payload);
+    await writeDraftHistoryRecord({ ...record, lastUsedAt: new Date().toISOString() });
+    await refreshDraftHistory();
+    setSourceView("import");
+    qs("draftImportPanel").open = true;
+    qs("importStatus").textContent = `已从历史载入：${record.caseNo || record.sourceName}`;
+  } catch (error) {
+    qs("importStatus").textContent = `历史载入失败：${error.message}`;
+  }
+}
+
+async function deleteDraftFromHistory(id) {
+  const record = state.draftHistory.find((item) => item.id === id);
+  if (!window.confirm(`删除历史记录“${record?.caseNo || "未命名整理稿"}”？`)) return;
+  await removeDraftHistoryRecords([id]);
+  await refreshDraftHistory();
+}
+
+async function clearDraftHistory() {
+  if (!state.draftHistory.length) return;
+  if (!window.confirm(`清空当前浏览器中的 ${state.draftHistory.length} 条 JSON 历史？`)) return;
+  await removeDraftHistoryRecords(state.draftHistory.map((item) => item.id));
+  await refreshDraftHistory();
 }
 
 async function api(path, options = {}) {
@@ -1594,10 +1873,17 @@ async function importDraft() {
     const text = qs("draftText").value;
     const payload = extractJsonFromText(text);
     applyDraft(payload);
+    let historySaved = true;
+    try {
+      await saveDraftHistory(text, payload, state.draftFileName || "粘贴导入");
+    } catch {
+      historySaved = false;
+    }
     const groupCount = payload.shipment_groups?.length || 0;
-    qs("importStatus").textContent = groupCount > 1
+    const importMessage = groupCount > 1
       ? `已导入整理稿：识别到 ${groupCount} 个提单组，请在“拆单”页选择要核验的提单。`
       : "已导入整理稿，已刷新基础信息、PI、PKG 和提单差异核对。";
+    qs("importStatus").textContent = `${importMessage}${historySaved ? " 已保存到历史。" : " 当前浏览器无法保存历史。"}`;
   } catch (error) {
     qs("importStatus").textContent = `导入失败：${error.message}`;
   }
@@ -1795,6 +2081,15 @@ function bindTabs() {
 
 function bindActions() {
   qs("refreshCases").addEventListener("click", loadCases);
+  qs("toggleSidebar").addEventListener("click", toggleSidebar);
+  document.querySelectorAll("[data-source-view]").forEach((button) => {
+    button.addEventListener("click", () => setSourceView(button.dataset.sourceView));
+  });
+  qs("historySearch").addEventListener("input", (event) => {
+    state.historyQuery = event.target.value;
+    renderDraftHistory();
+  });
+  qs("clearHistoryButton").addEventListener("click", clearDraftHistory);
   qs("scanButton").addEventListener("click", () => scanFolder(qs("folderInput").value));
   qs("validateButton").addEventListener("click", validateCurrent);
   qs("exportButton").addEventListener("click", toggleExportMenu);
@@ -1813,8 +2108,12 @@ function bindActions() {
   qs("draftFile").addEventListener("change", async (event) => {
     const file = event.target.files?.[0];
     if (!file) return;
+    state.draftFileName = file.name;
     qs("draftText").value = await file.text();
     qs("importStatus").textContent = `已读取：${file.name}`;
+  });
+  qs("draftText").addEventListener("input", () => {
+    state.draftFileName = "";
   });
   document.querySelectorAll("[data-open-tab]").forEach((button) => {
     button.addEventListener("click", () => openTab(button.dataset.openTab));
@@ -1830,6 +2129,8 @@ function openTab(tabName) {
 window.addEventListener("DOMContentLoaded", async () => {
   bindTabs();
   bindActions();
+  restoreSidebarState();
+  await refreshDraftHistory();
   try {
     await loadKnowledge();
     await loadCases();
