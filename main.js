@@ -298,41 +298,50 @@ function copyWorkbookCellStyle(sheet, sourceAddress, targetAddress) {
 
 function preparePipkgTableLayout(pi, pkg) {
   for (let row = 18; row <= 37; row += 1) {
-    copyWorkbookCellStyle(pi, `F${row}`, `G${row}`);
-    copyWorkbookCellStyle(pi, `E${row}`, `F${row}`);
-    copyWorkbookCellStyle(pi, `D${row}`, `E${row}`);
+    const rightEdgeStyle = cloneWorkbookStyle(pi.getCell(`C${row}`).style);
+    pi.unMergeCells(`A${row}:C${row}`);
+    pi.getCell(`B${row}`).style = rightEdgeStyle;
+    pi.mergeCells(`A${row}:B${row}`);
+    copyWorkbookCellStyle(pi, `D${row}`, `C${row}`);
   }
-  pi.getColumn("E").width = 10;
-  pi.getColumn("F").width = 14.4;
-  pi.getColumn("G").width = 12.4;
-  setWorkbookCell(pi, "D18", "Quantity");
-  setWorkbookCell(pi, "E18", "UNIT");
-  setWorkbookCell(pi, "F18", "Unit Price");
-  setWorkbookCell(pi, "G18", "Amount\nUSD");
+  pi.getColumn("A").width = 20;
+  pi.getColumn("B").width = 25;
+  pi.getColumn("C").width = 18;
+  pi.getColumn("D").width = 12;
+  pi.getColumn("E").width = 13.4;
+  pi.getColumn("F").width = 16;
+  setWorkbookCell(pi, "C18", "Quantity");
+  setWorkbookCell(pi, "D18", "UNIT");
+  setWorkbookCell(pi, "E18", "Unit Price");
+  setWorkbookCell(pi, "F18", "Amount\nUSD");
+  setWorkbookCell(pi, "D37", "");
   setWorkbookCell(pi, "E37", "");
-  setWorkbookCell(pi, "F37", "");
+  for (let row = 18; row <= 37; row += 1) setWorkbookCell(pi, `G${row}`, "");
+  pi.pageSetup.printArea = "A1:F50";
 
   for (let row = 14; row <= 33; row += 1) {
-    [["H", "I"], ["G", "H"], ["F", "G"], ["E", "F"], ["D", "E"]].forEach(([source, target]) => {
-      copyWorkbookCellStyle(pkg, `${source}${row}`, `${target}${row}`);
-    });
+    pkg.unMergeCells(`A${row}:B${row}`);
+    copyWorkbookCellStyle(pkg, `C${row}`, `B${row}`);
   }
-  pkg.getColumn("I").width = pkg.getColumn("H").width;
-  pkg.getColumn("H").width = pkg.getColumn("G").width;
-  pkg.getColumn("G").width = pkg.getColumn("F").width;
-  pkg.getColumn("F").width = pkg.getColumn("E").width;
-  pkg.getColumn("E").width = pkg.getColumn("D").width;
-  pkg.getColumn("D").width = 10;
-  setWorkbookCell(pkg, "C14", "QUANTITY");
-  setWorkbookCell(pkg, "D14", "UNIT");
-  setWorkbookCell(pkg, "E14", "PKG");
-  setWorkbookCell(pkg, "F14", "G.W.(KGS)");
-  setWorkbookCell(pkg, "G14", "N.W.(KGS)");
-  setWorkbookCell(pkg, "H14", "TTL CBM");
-  setWorkbookCell(pkg, "I14", "HS CODE");
-  setWorkbookCell(pkg, "D33", "");
-  setWorkbookCell(pkg, "I33", "");
-  pkg.pageSetup.printArea = "A1:I35";
+  pkg.getColumn("A").width = 52.05;
+  pkg.getColumn("B").width = 12;
+  pkg.getColumn("C").width = 9;
+  pkg.getColumn("D").width = 9;
+  pkg.getColumn("E").width = 13;
+  pkg.getColumn("F").width = 13;
+  pkg.getColumn("G").width = 13;
+  pkg.getColumn("H").width = 17;
+  setWorkbookCell(pkg, "B14", "QUANTITY");
+  setWorkbookCell(pkg, "C14", "UNIT");
+  setWorkbookCell(pkg, "D14", "PKG");
+  setWorkbookCell(pkg, "E14", "G.W.(KGS)");
+  setWorkbookCell(pkg, "F14", "N.W.(KGS)");
+  setWorkbookCell(pkg, "G14", "TTL CBM");
+  setWorkbookCell(pkg, "H14", "HS CODE");
+  setWorkbookCell(pkg, "C33", "");
+  setWorkbookCell(pkg, "H33", "");
+  for (let row = 14; row <= 33; row += 1) setWorkbookCell(pkg, `I${row}`, "");
+  pkg.pageSetup.printArea = "A1:H35";
 }
 
 function deliveryAndPaymentText(data) {
@@ -387,8 +396,8 @@ async function exportPipkgInBrowser(data) {
   const paymentText = deliveryAndPaymentText(data);
   setWorkbookCell(pi, "C15", paymentText);
   setWorkbookCell(pkg, "C11", paymentText);
-  clearWorkbookRows(pi, 19, 34, 1, 7);
-  clearWorkbookRows(pkg, 15, 32, 1, 9);
+  clearWorkbookRows(pi, 19, 34, 1, 6);
+  clearWorkbookRows(pkg, 15, 32, 1, 8);
   const items = (data.items || []).slice(0, 16);
   let totalQuantity = 0;
   let totalAmount = 0;
@@ -398,49 +407,49 @@ async function exportPipkgInBrowser(data) {
     const unitPrice = Number(item.unit_price || 0);
     const amount = quantity * unitPrice;
     setWorkbookCell(pi, `A${row}`, item.description_en || "");
-    setWorkbookCell(pi, `D${row}`, quantity);
-    setWorkbookCell(pi, `E${row}`, normalizeQuantityUnit(item.unit));
-    setWorkbookCell(pi, `F${row}`, unitPrice);
-    pi.getCell(`G${row}`).value = { formula: `D${row}*F${row}`, result: amount };
-    pi.getCell(`G${row}`).numFmt = "#,##0.00";
+    setWorkbookCell(pi, `C${row}`, quantity);
+    setWorkbookCell(pi, `D${row}`, normalizeQuantityUnit(item.unit));
+    setWorkbookCell(pi, `E${row}`, unitPrice);
+    pi.getCell(`F${row}`).value = { formula: `C${row}*E${row}`, result: amount };
+    pi.getCell(`F${row}`).numFmt = "#,##0.00";
     totalQuantity += quantity;
     totalAmount += amount;
   });
   const packing = (data.packing_lines || []).length
     ? data.packing_lines
     : (data.items || []).map((item) => ({ ...item, packages: "", gross_weight: "", net_weight: "", cbm: "" }));
-  const packingTotals = { C: 0, E: 0, F: 0, G: 0, H: 0 };
+  const packingTotals = { B: 0, D: 0, E: 0, F: 0, G: 0 };
   packing.slice(0, 18).forEach((line, index) => {
     const row = 15 + index;
     const values = {
-      C: Number(line.quantity || 0),
-      E: Number(line.packages || 0),
-      F: line.gross_weight === "" ? 0 : Number(line.gross_weight || 0),
-      G: line.net_weight === "" ? 0 : Number(line.net_weight || 0),
-      H: line.cbm === "" ? 0 : Number(line.cbm || 0),
+      B: Number(line.quantity || 0),
+      D: Number(line.packages || 0),
+      E: line.gross_weight === "" ? 0 : Number(line.gross_weight || 0),
+      F: line.net_weight === "" ? 0 : Number(line.net_weight || 0),
+      G: line.cbm === "" ? 0 : Number(line.cbm || 0),
     };
     setWorkbookCell(pkg, `A${row}`, line.description_en || "");
-    setWorkbookCell(pkg, `C${row}`, values.C);
-    setWorkbookCell(pkg, `D${row}`, normalizeQuantityUnit(line.unit));
-    setWorkbookCell(pkg, `E${row}`, values.E);
-    setWorkbookCell(pkg, `F${row}`, line.gross_weight === "" ? "" : values.F);
-    setWorkbookCell(pkg, `G${row}`, line.net_weight === "" ? "" : values.G);
-    setWorkbookCell(pkg, `H${row}`, line.cbm === "" ? "" : values.H);
-    setWorkbookCell(pkg, `I${row}`, line.hs_code || "");
+    setWorkbookCell(pkg, `B${row}`, values.B);
+    setWorkbookCell(pkg, `C${row}`, normalizeQuantityUnit(line.unit));
+    setWorkbookCell(pkg, `D${row}`, values.D);
+    setWorkbookCell(pkg, `E${row}`, line.gross_weight === "" ? "" : values.E);
+    setWorkbookCell(pkg, `F${row}`, line.net_weight === "" ? "" : values.F);
+    setWorkbookCell(pkg, `G${row}`, line.cbm === "" ? "" : values.G);
+    setWorkbookCell(pkg, `H${row}`, line.hs_code || "");
     Object.keys(packingTotals).forEach((column) => {
       packingTotals[column] += values[column];
     });
   });
-  pi.getCell("D37").value = { formula: "SUM(D19:D34)", result: totalQuantity };
-  pi.getCell("G37").value = { formula: "SUM(G19:G34)", result: totalAmount };
-  pi.getCell("G37").numFmt = "#,##0.00";
+  pi.getCell("C37").value = { formula: "SUM(C19:C34)", result: totalQuantity };
+  pi.getCell("F37").value = { formula: "SUM(F19:F34)", result: totalAmount };
+  pi.getCell("F37").numFmt = "#,##0.00";
   const blGrossWeight = sourceTotalNumber(data.bl_totals, "gross_weight");
   const blCbm = sourceTotalNumber(data.bl_totals, "cbm");
   Object.entries(packingTotals).forEach(([column, result]) => {
-    const sourceValue = column === "F" ? blGrossWeight : column === "H" ? blCbm : null;
+    const sourceValue = column === "E" ? blGrossWeight : column === "G" ? blCbm : null;
     if (sourceValue !== null) {
       setWorkbookCell(pkg, `${column}33`, sourceValue);
-      const key = column === "F" ? "gross_weight" : "cbm";
+      const key = column === "E" ? "gross_weight" : "cbm";
       pkg.getCell(`${column}33`).numFmt = sourceNumberFormat(data.bl_totals?.[`${key}_display`]);
       return;
     }
