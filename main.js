@@ -646,6 +646,12 @@ function sourceNumberFormat(display, fallbackDecimals = 3) {
   return `#,##0${decimals ? `.${"0".repeat(decimals)}` : ""}`;
 }
 
+function itemNameWithHsCode(description, hsCode) {
+  const name = String(description || "").trim();
+  const code = String(hsCode || "").trim();
+  return [name, code ? `HSCODE:${code}` : ""].filter(Boolean).join(" ");
+}
+
 async function exportPipkgInBrowser(data) {
   if (!window.ExcelJS) throw new Error("Excel 导出组件未加载");
   applyDefaultNetWeights(data);
@@ -685,7 +691,7 @@ async function exportPipkgInBrowser(data) {
     const quantity = Number(item.quantity || 0);
     const unitPrice = Number(item.unit_price || 0);
     const amount = quantity * unitPrice;
-    setWorkbookCell(pi, `A${row}`, [item.description_en, item.hs_code].filter(Boolean).join(" "));
+    setWorkbookCell(pi, `A${row}`, itemNameWithHsCode(item.description_en, item.hs_code));
     setWorkbookCell(pi, `C${row}`, quantity);
     setWorkbookCell(pi, `D${row}`, normalizeQuantityUnit(item.unit));
     setWorkbookCell(pi, `E${row}`, unitPrice);
@@ -707,7 +713,7 @@ async function exportPipkgInBrowser(data) {
       F: line.net_weight === "" ? 0 : Number(line.net_weight || 0),
       G: line.cbm === "" ? 0 : Number(line.cbm || 0),
     };
-    setWorkbookCell(pkg, `A${row}`, [line.description_en, line.hs_code].filter(Boolean).join(" "));
+    setWorkbookCell(pkg, `A${row}`, itemNameWithHsCode(line.description_en, line.hs_code));
     setWorkbookCell(pkg, `B${row}`, values.B);
     setWorkbookCell(pkg, `C${row}`, normalizeQuantityUnit(line.unit));
     setWorkbookCell(pkg, `D${row}`, values.D);
