@@ -42,6 +42,17 @@
                 <textarea id="draftText" placeholder="粘贴 trade-doc-summary-extractor 输出的 JSON"></textarea>
                 <button id="importDraftButton">导入整理稿</button>
                 <div class="source-note" id="importStatus">支持 shipment_groups、fields、items 和 packing_lines。</div>
+                <details class="knowledge-import-panel">
+                  <summary>HS Code 参考</summary>
+                  <div class="knowledge-import-box">
+                    <input id="knowledgeFile" type="file" accept=".json" />
+                    <div class="button-group knowledge-actions">
+                      <button id="importKnowledgeButton" type="button">导入增量</button>
+                      <button id="exportKnowledgeButton" type="button">导出本机参考</button>
+                    </div>
+                    <div class="source-note" id="knowledgeStatus">本机已确认 0 条</div>
+                  </div>
+                </details>
               </div>
             </details>
             <label class="input-label" for="folderInput">资料目录</label>
@@ -75,6 +86,7 @@
                 <div class="export-menu" id="exportMenu" hidden>
                   <button type="button" data-export-kind="pipkg">导出 PIPKG</button>
                   <button type="button" data-export-kind="si">导出 SI</button>
+                  <button type="button" data-export-kind="fedex">导出 FedEx PI</button>
                 </div>
               </div>
             </div>
@@ -82,17 +94,25 @@
 
           <div class="summary-grid" id="caseSummary"></div>
 
+          <div class="shipment-switch" role="group" aria-label="运输类型">
+            <span>运输类型</span>
+            <div class="segmented-control">
+              <button type="button" data-shipment-type="sea">海运柜</button>
+              <button type="button" data-shipment-type="fedex">FedEx</button>
+            </div>
+          </div>
+
           <details class="reconciliation-panel" id="reconciliationPanel" open>
             <summary>提单差异核对</summary>
             <div class="reconciliation-grid" id="reconciliationGrid"></div>
           </details>
 
           <div class="tabs" role="tablist">
-            <button class="tab" data-tab="groups">拆单</button>
+            <button class="tab" data-tab="groups" data-sea-only>拆单</button>
             <button class="tab active" data-tab="fields">基础信息</button>
-            <button class="tab" data-tab="si">SI</button>
-            <button class="tab" data-tab="items">PI</button>
-            <button class="tab" data-tab="packing">PKG</button>
+            <button class="tab" data-tab="si" data-sea-only>SI</button>
+            <button class="tab" data-tab="items" id="itemsTabLabel">PI</button>
+            <button class="tab" data-tab="packing" data-sea-only>PKG</button>
           </div>
 
           <div class="tab-panel active" id="tab-fields">
@@ -119,7 +139,10 @@
                     <th>单位</th>
                     <th>总价</th>
                     <th>HS code</th>
+                    <th data-fedex-only>材质</th>
+                    <th data-fedex-only>用途</th>
                     <th>来源</th>
+                    <th data-fedex-only>HS 参考</th>
                     <th class="row-action-col" aria-label="商品行操作">操作</th>
                   </tr>
                 </thead>
@@ -165,6 +188,6 @@
       </section>
     </main>
     <script src="./exceljs.min.js"></script>
-    <script src="./main.js?v=20260818-persistent-edits"></script>
+    <script src="./main.js?v=20260818-fedex-knowledge-2"></script>
   </body>
 </html>

@@ -592,6 +592,49 @@ p {
   border-bottom: 1px solid var(--line);
 }
 
+.shipment-switch {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 10px 14px;
+  border-bottom: 1px solid var(--line);
+  background: #fbfcfc;
+  color: var(--muted);
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.segmented-control {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(92px, 1fr));
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  overflow: hidden;
+}
+
+.segmented-control button {
+  min-height: 32px;
+  border: 0;
+  border-right: 1px solid var(--line);
+  border-radius: 0;
+  background: #fff;
+}
+
+.segmented-control button:last-child {
+  border-right: 0;
+}
+
+.segmented-control button.active {
+  background: var(--accent);
+  color: #fff;
+}
+
+body.shipment-fedex [data-sea-only],
+body.shipment-sea [data-fedex-only] {
+  display: none;
+}
+
 .reconciliation-panel {
   border-bottom: 1px solid var(--line);
   background: #fbfcfc;
@@ -771,6 +814,28 @@ p {
   gap: 10px;
 }
 
+.knowledge-import-panel {
+  border-top: 1px solid var(--line);
+  padding-top: 8px;
+}
+
+.knowledge-import-panel summary {
+  cursor: pointer;
+  color: var(--ink);
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.knowledge-import-box {
+  display: grid;
+  gap: 8px;
+  padding-top: 9px;
+}
+
+.knowledge-actions {
+  justify-content: flex-start;
+}
+
 .import-box textarea {
   min-height: 220px;
   font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
@@ -792,6 +857,67 @@ table {
 #itemsTable th:nth-child(2),
 #itemsTable td:nth-child(2) {
   width: 110px;
+}
+
+body.shipment-fedex #itemsTable {
+  min-width: 1420px;
+}
+
+.hs-reference-cell {
+  min-width: 190px;
+}
+
+.hs-reference {
+  display: grid;
+  gap: 6px;
+}
+
+.hs-reference-title {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.hs-reference small,
+.price-review small {
+  color: var(--muted);
+  line-height: 1.35;
+}
+
+.hs-reference-actions {
+  display: flex;
+  gap: 5px;
+  flex-wrap: wrap;
+}
+
+.hs-reference-actions button {
+  min-height: 28px;
+  padding: 0 8px;
+  font-size: 12px;
+}
+
+.hs-reference-actions .reject-reference {
+  color: var(--error);
+}
+
+.price-review {
+  display: grid;
+  gap: 5px;
+}
+
+.price-review label {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  color: var(--warn);
+  font-size: 11px;
+}
+
+.price-review input[type="checkbox"] {
+  width: 15px;
+  min-height: 15px;
+  padding: 0;
 }
 
 .row-action-col,
