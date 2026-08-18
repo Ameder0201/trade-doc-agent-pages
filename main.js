@@ -408,6 +408,22 @@ function normalizeProductText(value) {
     .trim();
 }
 
+function uniqueHsCandidates(candidates = []) {
+  const byCode = new Map();
+  candidates.forEach((candidate) => {
+    const record = typeof candidate === "string" ? { hs_code: candidate } : candidate || {};
+    const code = String(record.hs_code || record.code || "").trim();
+    const normalized = normalizeHsCode(code);
+    if (!normalized || byCode.has(normalized)) return;
+    byCode.set(normalized, {
+      ...record,
+      hs_code: code,
+      normalized_hs_code: normalized,
+    });
+  });
+  return [...byCode.values()];
+}
+
 function escapeHtml(value) {
   return String(value ?? "")
     .replaceAll("&", "&amp;")
@@ -471,16 +487,34 @@ function matchFedexHsKnowledge(item, destinationCountry = "") {
   }
   const { entry, matchedOn, aliasMatch, materialMatch } = matches[0];
   const confirmed = ["confirmed", "browser_confirmed"].includes(entry.status);
+  const candidateCodes = uniqueHsCandidates([
+    {
+      hs_code: entry.hs_code,
+      source: entry.status === "browser_confirmed" ? "browser_confirmed" : "fedex_history_or_knowledge",
+      source_label: entry.status === "browser_confirmed" ? "本机已确认" : "FedEx 历史参考",
+      source_count: Number(entry.source_count || 0),
+    },
+    ...(entry.reference_conflicts || []).map((conflict) => ({
+      hs_code: conflict.hs_code,
+      source: "local_hscode_summary",
+      source_label: `${conflict.source_file || "HSCODE汇总表.xlsx"}${conflict.row ? ` 第 ${conflict.row} 行` : ""}`,
+      source_count: 1,
+      evidence: conflict,
+    })),
+  ]);
+  const referenceConflict = !sourceCode && candidateCodes.length > 1;
   return {
-    status: sourceCode ? "source_explicit" : confirmed && aliasMatch && materialMatch ? "confirmed_exact" : "candidate",
+    status: sourceCode ? "source_explicit" : !referenceConflict && confirmed && aliasMatch && materialMatch ? "confirmed_exact" : "candidate",
     knowledge_id: entry.id,
     suggested_hs_code: item.hs_code || entry.hs_code || "",
     normalized_hs_code: sourceCode || normalizeHsCode(entry.hs_code),
     matched_on: matchedOn,
     source_count: Number(entry.source_count || 0),
+    candidate_codes: referenceConflict ? candidateCodes : [],
+    reference_conflict: referenceConflict,
     knowledge_status: entry.status || "candidate",
-    confidence: sourceCode || (confirmed && aliasMatch && materialMatch) ? "high" : aliasMatch ? "medium" : "low",
-    needs_confirmation: sourceCode ? false : !(confirmed && aliasMatch && materialMatch),
+    confidence: sourceCode || (!referenceConflict && confirmed && aliasMatch && materialMatch) ? "high" : aliasMatch ? "medium" : "low",
+    needs_confirmation: sourceCode ? false : referenceConflict || !(confirmed && aliasMatch && materialMatch),
   };
 }
 
@@ -538,21 +572,28 @@ function localKnowledgeEntry(item, hsCode) {
   };
 }
 
-async function confirmHsReference(rowIndex) {
+async function confirmHsReference(rowIndex, selectedCode = "") {
   const item = state.current?.items?.[rowIndex];
   if (!item) return;
-  const code = String(item.hs_code || item.hs_code_reference?.suggested_hs_code || "").trim();
+  const reference = item.hs_code_reference || {};
+  const candidates = uniqueHsCandidates(reference.candidate_codes || []);
+  const code = String(selectedCode || item.hs_code || reference.suggested_hs_code || "").trim();
   if (!normalizeHsCode(code)) {
     window.alert("请先填写或采用一个 HS Code。");
     return;
   }
+  const selectedCandidate = candidates.find((candidate) => candidate.normalized_hs_code === normalizeHsCode(code));
   item.hs_code = code;
   item.hs_code_reference = {
-    ...(item.hs_code_reference || {}),
+    ...reference,
     status: "browser_confirmed",
     suggested_hs_code: code,
     normalized_hs_code: normalizeHsCode(code),
-    matched_on: [...new Set([...(item.hs_code_reference?.matched_on || []), "user_confirmation"])],
+    selected_hs_code: code,
+    selected_candidate: selectedCandidate || null,
+    selected_from_conflict: candidates.length > 1,
+    selected_at: new Date().toISOString(),
+    matched_on: [...new Set([...(reference.matched_on || []), "user_confirmation"])],
     confidence: "high",
     needs_confirmation: false,
   };
@@ -560,12 +601,21 @@ async function confirmHsReference(rowIndex) {
   await writeLocalHsKnowledge([entry]);
   await refreshLocalHsKnowledge();
   state.current.knowledge_feedback = (state.current.knowledge_feedback || []).filter((feedback) => feedback.id !== entry.id);
-  state.current.knowledge_feedback.push({ ...entry, action: "confirmed" });
+  state.current.knowledge_feedback.push({
+    ...entry,
+    action: candidates.length > 1 ? "selected_from_reference_conflict" : "confirmed",
+    candidate_codes: candidates,
+    selected_candidate: selectedCandidate || null,
+  });
+  state.current.issues = (state.current.issues || []).filter((issue) => !(
+    issue.type === "hs_code_reference_conflict" && issue.field === `items[${rowIndex}].hs_code`
+  ));
   state.current = validateInBrowser(state.current);
   markDirty();
   renderItems();
   renderSummary();
   renderIssues();
+  await persistCurrentDraft();
 }
 
 function rejectHsReference(rowIndex) {
@@ -1833,16 +1883,31 @@ function hsReferenceCell(item, index) {
     unresolved: "未匹配",
   };
   const status = reference.status || "unresolved";
+  const candidates = uniqueHsCandidates(reference.candidate_codes || []);
+  const hasConflict = reference.reference_conflict === true && candidates.length > 1;
+  const conflictPending = hasConflict && status !== "browser_confirmed";
   const suggested = reference.suggested_hs_code || item.hs_code || "";
-  const tone = reference.needs_confirmation ? "warning" : ["rejected", "unresolved"].includes(status) ? "low" : "high";
-  const sourceText = reference.knowledge_id
+  const tone = conflictPending ? "low" : reference.needs_confirmation ? "warning" : ["rejected", "unresolved"].includes(status) ? "low" : "high";
+  const sourceText = conflictPending
+    ? `检测到 ${candidates.length} 个参考编码，请人工选择`
+    : reference.knowledge_id
     ? `${reference.knowledge_id}${reference.source_count ? ` · ${reference.source_count} 次来源` : ""}`
     : status === "source_explicit" ? "本次来源文件" : "暂无可靠参考";
-  const canConfirm = Boolean(normalizeHsCode(item.hs_code || suggested)) && !["source_explicit", "confirmed_exact", "browser_confirmed"].includes(status);
+  const canConfirm = !conflictPending && Boolean(normalizeHsCode(item.hs_code || suggested)) && !["source_explicit", "confirmed_exact", "browser_confirmed"].includes(status);
   return `
     <div class="hs-reference">
-      <div class="hs-reference-title"><span class="tag ${tone}">${labels[status] || status}</span>${suggested ? `<strong>${escapeHtml(suggested)}</strong>` : ""}</div>
+      <div class="hs-reference-title"><span class="tag ${tone}">${conflictPending ? "编码冲突" : labels[status] || status}</span>${!conflictPending && suggested ? `<strong>${escapeHtml(suggested)}</strong>` : ""}</div>
       <small>${escapeHtml(sourceText)}</small>
+      ${conflictPending ? `
+        <div class="hs-conflict-options" role="group" aria-label="选择第 ${index + 1} 行商品 HS Code">
+          ${candidates.map((candidate) => `
+            <button type="button" class="hs-conflict-code-button" data-select-hs-row="${index}" data-select-hs-code="${candidate.normalized_hs_code}">
+              <strong>${escapeHtml(candidate.hs_code)}</strong>
+              <span>${escapeHtml(candidate.source_label || candidate.source || "参考来源")}</span>
+            </button>
+          `).join("")}
+        </div>
+      ` : ""}
       <div class="hs-reference-actions">
         ${canConfirm ? `<button type="button" data-confirm-hs-row="${index}">${item.hs_code ? "确认当前" : "采用并确认"}</button>` : ""}
         ${status === "candidate" ? `<button type="button" class="reject-reference" data-reject-hs-row="${index}">不采用</button>` : ""}
@@ -1914,6 +1979,12 @@ function renderItems() {
   bindDeleteRows("items");
   tbody.querySelectorAll("[data-confirm-hs-row]").forEach((button) => {
     button.addEventListener("click", () => confirmHsReference(Number(button.dataset.confirmHsRow)));
+  });
+  tbody.querySelectorAll("[data-select-hs-row]").forEach((button) => {
+    button.addEventListener("click", () => confirmHsReference(
+      Number(button.dataset.selectHsRow),
+      button.dataset.selectHsCode,
+    ));
   });
   tbody.querySelectorAll("[data-reject-hs-row]").forEach((button) => {
     button.addEventListener("click", () => rejectHsReference(Number(button.dataset.rejectHsRow)));

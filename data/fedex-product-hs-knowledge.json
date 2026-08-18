@@ -22,7 +22,19 @@
       "source_files": ["FT26010401.xlsx", "FT26012601.xlsx"],
       "last_seen": "2026-01-26",
       "required_keywords": ["CORNER", "CONNECTOR"],
-      "material_keywords": ["PLASTIC", "塑料"]
+      "material_keywords": ["PLASTIC", "塑料"],
+      "reference_conflicts": [
+        {
+          "hs_code": "3926300000",
+          "normalized_hs_code": "3926300000",
+          "source_file": "HSCODE汇总表.xlsx",
+          "sheet": "Sheet1",
+          "row": 15,
+          "matched_on": ["product_name", "material", "use"],
+          "status": "reference_conflict",
+          "note": "汇总表编码与两份历史 FedEx 发票编码不同，需人工确认。"
+        }
+      ]
     },
     {
       "id": "polishing-wheel",
