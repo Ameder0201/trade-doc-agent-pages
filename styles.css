@@ -935,9 +935,71 @@ body.shipment-fedex #itemsTable {
   line-height: 1.25;
 }
 
+.hs-conflict-option {
+  display: grid;
+  gap: 3px;
+}
+
+.hs-conflict-option a {
+  color: var(--accent);
+  font-size: 10px;
+  text-decoration: none;
+}
+
+.hs-conflict-option a:hover,
+.hs-conflict-option a:focus-visible {
+  text-decoration: underline;
+}
+
 .price-review {
   display: grid;
   gap: 5px;
+}
+
+.item-recommendation-cell {
+  display: grid;
+  gap: 6px;
+}
+
+.item-recommendation-cell textarea {
+  min-height: 132px;
+  font-size: 13px;
+  line-height: 1.4;
+}
+
+.item-recommendation-options summary {
+  cursor: pointer;
+  color: var(--accent);
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.item-recommendation-list {
+  display: grid;
+  gap: 5px;
+  padding-top: 6px;
+}
+
+.item-recommendation-list button {
+  display: grid;
+  gap: 2px;
+  min-height: 40px;
+  padding: 6px 7px;
+  border-color: #9fc7b8;
+  background: #f6fbf8;
+  color: var(--ink);
+  text-align: left;
+}
+
+.item-recommendation-list strong {
+  font-size: 11px;
+  line-height: 1.3;
+}
+
+.item-recommendation-list span {
+  color: var(--muted);
+  font-size: 10px;
+  line-height: 1.25;
 }
 
 .price-review label {

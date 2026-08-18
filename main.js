@@ -398,6 +398,15 @@ function normalizeHsCode(value) {
   return String(value || "").replace(/\D/g, "");
 }
 
+function originCountryDisplay(value = "") {
+  const country = String(value || "CHINA").trim().toUpperCase() || "CHINA";
+  return country.startsWith("MADE IN ") ? country : `MADE IN ${country}`;
+}
+
+function originCountryName(value = "") {
+  return originCountryDisplay(value).replace(/^MADE IN\s+/i, "").trim() || "CHINA";
+}
+
 function normalizeProductText(value) {
   return String(value || "")
     .toUpperCase()
@@ -525,6 +534,29 @@ function applyFedexHsKnowledge(data) {
     const existing = item.hs_code_reference || {};
     const reference = matchFedexHsKnowledge(item, destination);
     if (existing.status && !["unresolved", "candidate"].includes(existing.status)) return;
+    const existingCandidates = uniqueHsCandidates(existing.candidate_codes || []);
+    if (existingCandidates.length) {
+      const matchedCandidates = uniqueHsCandidates([
+        ...(reference.candidate_codes || []),
+        reference.suggested_hs_code ? {
+          hs_code: reference.suggested_hs_code,
+          source: reference.knowledge_status === "browser_confirmed" ? "browser_confirmed" : "fedex_history_or_knowledge",
+          source_label: reference.knowledge_status === "browser_confirmed" ? "本机已确认" : "FedEx 历史参考",
+          source_count: reference.source_count || 0,
+        } : null,
+      ].filter(Boolean));
+      const combined = uniqueHsCandidates([...existingCandidates, ...matchedCandidates]);
+      item.hs_code_reference = {
+        ...existing,
+        status: "candidate",
+        candidate_codes: combined,
+        reference_conflict: combined.length > 1,
+        suggested_hs_code: existing.suggested_hs_code || combined[0]?.hs_code || "",
+        needs_confirmation: true,
+      };
+      if (combined.length > 1 && !["source_explicit", "browser_confirmed"].includes(existing.status)) item.hs_code = "";
+      return;
+    }
     if (existing.status === "candidate" && reference.knowledge_status !== "browser_confirmed") return;
     item.hs_code_reference = reference;
     if (!item.hs_code && reference.status === "confirmed_exact") item.hs_code = reference.suggested_hs_code;
@@ -1253,11 +1285,11 @@ async function exportFedexInBrowser(data) {
   setWorkbookCell(sheet, "H12", String(consigneePhone || ""));
   sheet.getCell("H12").numFmt = "@";
   setWorkbookCell(sheet, "H13", fieldValue(data, "consignee_postcode", "/") || "/");
-  setWorkbookCell(sheet, "K13", fieldValue(data, "consignee_city", ""));
-  const origin = String(fieldValue(data, "origin_country", "CHINA") || "CHINA").toUpperCase();
-  setWorkbookCell(sheet, "F14", `MADE IN ${origin}`);
-  setWorkbookCell(sheet, "F15", origin);
-  setWorkbookCell(sheet, "J15", String(fieldValue(data, "destination_country", "") || "").toUpperCase());
+  setWorkbookCell(sheet, "K13", fieldValueAny(data, ["consignee_city"], "KUWAIT CITY"));
+  const origin = fieldValueAny(data, ["origin_country"], "MADE IN CHINA");
+  setWorkbookCell(sheet, "F14", originCountryDisplay(origin));
+  setWorkbookCell(sheet, "F15", originCountryName(origin));
+  setWorkbookCell(sheet, "J15", String(fieldValueAny(data, ["destination_country"], "KUWAIT")).toUpperCase());
 
   clearWorkbookRows(sheet, 18, lastItemRow, 1, 11);
   let totalAmount = 0;
@@ -1278,7 +1310,7 @@ async function exportFedexInBrowser(data) {
     sheet.getRow(row).height = fedexWorkbookRowHeight(item.description_en, item.description_cn, item.material, item.use);
     totalAmount += amount;
   });
-  const packages = fieldValue(data, "total_packages", data.totals?.packages ?? "");
+  const packages = fieldValueAny(data, ["total_packages"], data.totals?.packages || 1);
   setWorkbookCell(sheet, `F${totalRow}`, packages);
   sheet.getCell(`K${totalRow}`).value = { formula: `SUM(K18:K${17 + items.length})`, result: totalAmount };
   sheet.getCell(`K${totalRow}`).numFmt = "#,##0.00";
@@ -1389,7 +1421,7 @@ function setShipmentType(type) {
     state.activeGroupIndex = -1;
     state.current.active_group_id = "";
     setField("transport", "FEDEX");
-    if (!getField("destination_country") && /KUWAIT/i.test(getField("consignee_company"))) setField("destination_country", "KUWAIT");
+    ensureFedexDefaultFields();
   } else {
     setField("transport", "BY SEA");
   }
@@ -1465,6 +1497,32 @@ function ensureDefaultInvoiceFields() {
       evidence: [{ file: "default_naming_rule", locator: "current_date", text: "默认使用填表日期" }],
     };
   }
+  if (state.current.case?.shipment_type === "fedex") ensureFedexDefaultFields();
+}
+
+function ensureFedexDefaultFields() {
+  if (!state.current || state.current.case?.shipment_type !== "fedex") return;
+  const defaults = {
+    destination_country: "KUWAIT",
+    consignee_city: "KUWAIT CITY",
+    total_packages: 1,
+  };
+  const origin = String(getField("origin_country") || "").trim();
+  if (!origin || origin.toUpperCase() === "CHINA") {
+    state.current.fields.origin_country = {
+      value: "MADE IN CHINA",
+      confidence: "medium",
+      evidence: [{ file: "default_rule", locator: "origin_country", text: "FedEx 默认原产地" }],
+    };
+  }
+  Object.entries(defaults).forEach(([name, value]) => {
+    if (getField(name) !== "" && getField(name) !== null && getField(name) !== undefined) return;
+    state.current.fields[name] = {
+      value,
+      confidence: "medium",
+      evidence: [{ file: "default_rule", locator: name, text: "FedEx 项目默认值，可人工修改" }],
+    };
+  });
 }
 
 function partyBlock(party) {
@@ -1801,12 +1859,57 @@ function editableCell(value, key, rowIndex, tableName, textarea = false) {
   return `<input data-table="${tableName}" data-row="${rowIndex}" data-key="${key}" value="${escaped}" />`;
 }
 
+function normalizedFieldRecommendation(item, key) {
+  const raw = item.field_recommendations?.[key] || item.recommendations?.[key] || {};
+  const alternatives = (raw.alternatives || raw.options || [])
+    .map((option) => typeof option === "string" ? { value: option } : option || {})
+    .filter((option) => String(option.value || "").trim());
+  return {
+    ...raw,
+    recommended: String(raw.recommended || raw.value || "").trim(),
+    alternatives,
+  };
+}
+
+function itemRecommendationCell(item, key, index) {
+  const recommendation = normalizedFieldRecommendation(item, key);
+  const current = String(item[key] || recommendation.recommended || "").trim();
+  const alternatives = recommendation.alternatives.filter((option) => option.value !== current);
+  return `
+    <div class="item-recommendation-cell">
+      ${editableCell(current, key, index, "items", true)}
+      ${alternatives.length ? `
+        <details class="item-recommendation-options">
+          <summary>备选 ${alternatives.length}</summary>
+          <div class="item-recommendation-list">
+            ${alternatives.map((option) => `
+              <button type="button" data-item-recommendation-row="${index}" data-item-recommendation-key="${key}" data-item-recommendation-value="${escapeHtml(option.value)}">
+                <strong>${escapeHtml(option.value)}</strong>
+                ${option.reason ? `<span>${escapeHtml(option.reason)}</span>` : ""}
+              </button>
+            `).join("")}
+          </div>
+        </details>
+      ` : ""}
+    </div>
+  `;
+}
+
 function bindTableInputs(tableName) {
   document.querySelectorAll(`[data-table="${tableName}"]`).forEach((input) => {
     input.addEventListener("input", (event) => {
       const row = Number(event.target.dataset.row);
       const key = event.target.dataset.key;
       state.current[tableName][row][key] = event.target.value;
+      if (tableName === "items" && ["material", "use"].includes(key)) {
+        const item = state.current.items[row];
+        item.field_recommendations = item.field_recommendations || {};
+        item.field_recommendations[key] = {
+          ...normalizedFieldRecommendation(item, key),
+          selected: event.target.value,
+          status: "manual",
+        };
+      }
       if (tableName === "items" && ["quantity", "unit_price"].includes(key)) {
         const item = state.current.items[row];
         if (key === "unit_price") {
@@ -1850,7 +1953,11 @@ function bindTableInputs(tableName) {
       if (!["description_en", "description_cn", "material", "use"].includes(event.target.dataset.key)) return;
       const row = Number(event.target.dataset.row);
       const item = state.current.items[row];
-      if (!["browser_confirmed", "source_explicit"].includes(item.hs_code_reference?.status)) {
+      const importedCandidates = uniqueHsCandidates(item.hs_code_reference?.candidate_codes || []);
+      if (
+        !["browser_confirmed", "source_explicit"].includes(item.hs_code_reference?.status)
+        && !importedCandidates.length
+      ) {
         item.hs_code_reference = matchFedexHsKnowledge(item, getField("destination_country"));
         if (!item.hs_code && item.hs_code_reference.status === "confirmed_exact") item.hs_code = item.hs_code_reference.suggested_hs_code;
       }
@@ -1884,12 +1991,14 @@ function hsReferenceCell(item, index) {
   };
   const status = reference.status || "unresolved";
   const candidates = uniqueHsCandidates(reference.candidate_codes || []);
-  const hasConflict = reference.reference_conflict === true && candidates.length > 1;
+  const hasConflict = candidates.length > 1 && reference.needs_confirmation !== false;
   const conflictPending = hasConflict && status !== "browser_confirmed";
-  const suggested = reference.suggested_hs_code || item.hs_code || "";
+  const suggested = reference.suggested_hs_code || candidates[0]?.hs_code || item.hs_code || "";
   const tone = conflictPending ? "low" : reference.needs_confirmation ? "warning" : ["rejected", "unresolved"].includes(status) ? "low" : "high";
   const sourceText = conflictPending
     ? `检测到 ${candidates.length} 个参考编码，请人工选择`
+    : candidates.length === 1
+    ? candidates[0].source_label || candidates[0].source || "候选参考"
     : reference.knowledge_id
     ? `${reference.knowledge_id}${reference.source_count ? ` · ${reference.source_count} 次来源` : ""}`
     : status === "source_explicit" ? "本次来源文件" : "暂无可靠参考";
@@ -1900,11 +2009,14 @@ function hsReferenceCell(item, index) {
       <small>${escapeHtml(sourceText)}</small>
       ${conflictPending ? `
         <div class="hs-conflict-options" role="group" aria-label="选择第 ${index + 1} 行商品 HS Code">
-          ${candidates.map((candidate) => `
-            <button type="button" class="hs-conflict-code-button" data-select-hs-row="${index}" data-select-hs-code="${candidate.normalized_hs_code}">
-              <strong>${escapeHtml(candidate.hs_code)}</strong>
-              <span>${escapeHtml(candidate.source_label || candidate.source || "参考来源")}</span>
-            </button>
+          ${candidates.map((candidate, candidateIndex) => `
+            <div class="hs-conflict-option">
+              <button type="button" class="hs-conflict-code-button" data-select-hs-row="${index}" data-select-hs-code="${candidate.normalized_hs_code}">
+                <strong>${escapeHtml(candidate.hs_code)}${candidateIndex === 0 ? " · 推荐" : ""}</strong>
+                <span>${escapeHtml(candidate.description_cn || candidate.description_en || candidate.source_label || candidate.source || "参考来源")}</span>
+              </button>
+              ${candidate.official_url ? `<a href="${escapeHtml(candidate.official_url)}" target="_blank" rel="noreferrer">查看官方来源</a>` : ""}
+            </div>
           `).join("")}
         </div>
       ` : ""}
@@ -1953,6 +2065,37 @@ function bindDeleteRows(tableName) {
   });
 }
 
+async function selectItemFieldRecommendation(rowIndex, key, value) {
+  const item = state.current?.items?.[rowIndex];
+  if (!item || !["material", "use"].includes(key)) return;
+  item[key] = value;
+  item.field_recommendations = item.field_recommendations || {};
+  item.field_recommendations[key] = {
+    ...normalizedFieldRecommendation(item, key),
+    selected: value,
+    status: "browser_selected",
+    selected_at: new Date().toISOString(),
+  };
+  const reference = item.hs_code_reference || {};
+  const importedCandidates = uniqueHsCandidates(reference.candidate_codes || []);
+  if (
+    state.current.case?.shipment_type === "fedex"
+    && !["browser_confirmed", "source_explicit"].includes(reference.status)
+    && !importedCandidates.length
+  ) {
+    item.hs_code_reference = matchFedexHsKnowledge(item, getField("destination_country"));
+    if (!item.hs_code && item.hs_code_reference.status === "confirmed_exact") {
+      item.hs_code = item.hs_code_reference.suggested_hs_code;
+    }
+  }
+  state.current = validateInBrowser(state.current);
+  markDirty();
+  renderItems();
+  renderSummary();
+  renderIssues();
+  await persistCurrentDraft();
+}
+
 function renderItems() {
   const tbody = qs("itemsTable").querySelector("tbody");
   tbody.innerHTML = (state.current?.items || [])
@@ -1965,8 +2108,8 @@ function renderItems() {
         <td>${editableCell(item.unit, "unit", index, "items")}</td>
         <td>${editableCell(item.amount, "amount", index, "items")}</td>
         <td>${editableCell(item.hs_code, "hs_code", index, "items")}</td>
-        <td data-fedex-only>${editableCell(item.material, "material", index, "items", true)}</td>
-        <td data-fedex-only>${editableCell(item.use, "use", index, "items", true)}</td>
+        <td data-fedex-only>${itemRecommendationCell(item, "material", index)}</td>
+        <td data-fedex-only>${itemRecommendationCell(item, "use", index)}</td>
         <td>${escapeHtml(item.source || "manual")}</td>
         <td data-fedex-only class="hs-reference-cell">${hsReferenceCell(item, index)}</td>
         <td class="row-action-cell">
@@ -1988,6 +2131,13 @@ function renderItems() {
   });
   tbody.querySelectorAll("[data-reject-hs-row]").forEach((button) => {
     button.addEventListener("click", () => rejectHsReference(Number(button.dataset.rejectHsRow)));
+  });
+  tbody.querySelectorAll("[data-item-recommendation-row]").forEach((button) => {
+    button.addEventListener("click", () => selectItemFieldRecommendation(
+      Number(button.dataset.itemRecommendationRow),
+      button.dataset.itemRecommendationKey,
+      button.dataset.itemRecommendationValue,
+    ));
   });
   tbody.querySelectorAll("[data-price-confirm-row]").forEach((input) => {
     input.addEventListener("change", () => {
@@ -2404,6 +2554,9 @@ function quantitySourceNote(record) {
 function mapDraftItem(item) {
   const quantity = normalizeDraftQuantity(item);
   const sourceAmount = firstDefined(item.amount_calculated, item.amount_source, item.amount);
+  const fieldRecommendations = cloneJson(item.field_recommendations || item.recommendations || {});
+  const materialRecommendation = normalizedFieldRecommendation({ field_recommendations: fieldRecommendations }, "material");
+  const useRecommendation = normalizedFieldRecommendation({ field_recommendations: fieldRecommendations }, "use");
   return {
     merge_key: item.merge_key || "",
     description_en: item.description_en || "",
@@ -2417,8 +2570,9 @@ function mapDraftItem(item) {
     unit_price_basis: item.unit_price_basis || "",
     price_confirmed: item.price_confirmed === true || item.unit_price_method === "source",
     amount: sourceAmount === undefined ? quantity.quantity * quantity.unitPrice : draftNumber(sourceAmount),
-    material: item.material || "",
-    use: item.use || "",
+    material: item.material || materialRecommendation.recommended || "",
+    use: item.use || useRecommendation.recommended || "",
+    field_recommendations: fieldRecommendations,
     source: [item.allocation_method ? `整理稿导入 · ${item.allocation_method}` : "整理稿导入", quantitySourceNote(quantity)].filter(Boolean).join(" · "),
     confidence: item.confidence || "imported",
     container_breakdown: item.container_breakdown || [],
@@ -2511,6 +2665,7 @@ function mergeCurrentItems(originalRows, currentRows) {
       amount_calculated: row.amount,
       material: row.material,
       use: row.use,
+      field_recommendations: cloneJson(row.field_recommendations || merged.field_recommendations || {}),
       confidence: row.confidence || merged.confidence || "manual",
       container_breakdown: row.container_breakdown || merged.container_breakdown || [],
       quantity_source: row.quantity_source ?? merged.quantity_source ?? null,
