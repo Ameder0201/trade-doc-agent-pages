@@ -7,6 +7,10 @@ const state = {
   draftHistory: [],
   draftFileName: "",
   historyQuery: "",
+  activeHistoryId: "",
+  draftPayload: null,
+  dirty: false,
+  saveState: "idle",
 };
 
 const draftHistoryDbName = "trade-doc-agent";
@@ -199,8 +203,8 @@ function draftHistoryMetadata(payload) {
   };
 }
 
-async function saveDraftHistory(rawText, payload, sourceName) {
-  const id = await draftHistoryId(payload);
+async function saveDraftHistory(rawText, payload, sourceName, existingId = "") {
+  const id = existingId || await draftHistoryId(payload);
   const existing = await getDraftHistoryRecord(id);
   const now = new Date().toISOString();
   const record = {
@@ -208,7 +212,7 @@ async function saveDraftHistory(rawText, payload, sourceName) {
     ...draftHistoryMetadata(payload),
     id,
     rawText: rawText.trim(),
-    sourceName: sourceName || "粘贴导入",
+    sourceName: sourceName || existing?.sourceName || "粘贴导入",
     createdAt: existing?.createdAt || now,
     lastUsedAt: now,
   };
@@ -344,6 +348,43 @@ function toggleSidebar() {
   updateSidebarToggle();
 }
 
+function cloneJson(value) {
+  return value === undefined ? undefined : JSON.parse(JSON.stringify(value));
+}
+
+function updateSaveButton() {
+  const button = qs("saveButton");
+  if (!button) return;
+  button.disabled = !state.current;
+  button.classList.toggle("dirty", state.saveState === "dirty");
+  button.classList.toggle("saved", state.saveState === "saved");
+  button.classList.toggle("save-error", state.saveState === "error");
+  if (state.saveState === "dirty") {
+    button.textContent = "保存修改";
+    button.title = "保存当前整理稿的全部提单修改";
+  } else if (state.saveState === "saved") {
+    button.textContent = "已保存";
+    button.title = "修改已保存到当前浏览器历史";
+  } else if (state.saveState === "error") {
+    button.textContent = "保存失败";
+    button.title = "未能保存，请再次尝试";
+  } else {
+    button.textContent = "保存";
+    button.title = "保存当前整理稿";
+  }
+}
+
+function setSaveState(saveState) {
+  state.saveState = saveState;
+  state.dirty = saveState === "dirty";
+  updateSaveButton();
+}
+
+function markDirty() {
+  if (!state.current) return;
+  setSaveState("dirty");
+}
+
 async function loadDraftFromHistory(id) {
   const record = state.draftHistory.find((item) => item.id === id) || await getDraftHistoryRecord(id);
   if (!record) return;
@@ -352,6 +393,8 @@ async function loadDraftFromHistory(id) {
     state.draftFileName = record.sourceName || "";
     qs("draftText").value = record.rawText;
     applyDraft(payload);
+    state.activeHistoryId = record.id;
+    setSaveState("saved");
     await writeDraftHistoryRecord({ ...record, lastUsedAt: new Date().toISOString() });
     await refreshDraftHistory();
     setSourceView("import");
@@ -1084,6 +1127,7 @@ function renderFields() {
           setField("consignee_company", partyBlock(item));
         }
       }
+      markDirty();
       renderFields();
       renderSummary();
       if (code === "CUSTOM") {
@@ -1101,6 +1145,7 @@ function renderFields() {
         setField(name, event.target.value);
         if (input) input.value = event.target.value;
       }
+      markDirty();
       input?.focus();
       renderSummary();
     });
@@ -1124,6 +1169,7 @@ function renderFields() {
         const select = grid.querySelector(`[data-choice-select="${name}"]`);
         if (select) select.value = choice;
       }
+      markDirty();
       renderSummary();
     });
   });
@@ -1163,10 +1209,12 @@ function renderSiFields() {
   grid.querySelectorAll("[data-field]").forEach((input) => {
     input.addEventListener("input", (event) => {
       setField(event.target.dataset.field, event.target.value);
+      markDirty();
       renderSummary();
     });
     input.addEventListener("change", (event) => {
       setField(event.target.dataset.field, event.target.value);
+      markDirty();
       renderSummary();
     });
   });
@@ -1202,6 +1250,7 @@ function bindTableInputs(tableName) {
         delete state.current.packing_reconciliation?.[key];
         renderReconciliation();
       }
+      markDirty();
       renderSummary();
     });
   });
@@ -1211,6 +1260,7 @@ function deleteTableRow(tableName, rowIndex) {
   if (!state.current?.[tableName]?.[rowIndex]) return;
   state.current[tableName].splice(rowIndex, 1);
   reconcileIssuesAfterRowDelete(tableName, rowIndex);
+  markDirty();
   if (tableName === "items") {
     renderItems();
   } else {
@@ -1671,6 +1721,7 @@ function mapDraftItem(item) {
   const quantity = normalizeDraftQuantity(item);
   const sourceAmount = firstDefined(item.amount_calculated, item.amount_source, item.amount);
   return {
+    merge_key: item.merge_key || "",
     description_en: item.description_en || "",
     description_cn: item.description_cn || "",
     spec: item.spec || "",
@@ -1697,6 +1748,7 @@ function mapDraftItem(item) {
     set_basis: item.set_basis || "",
     quantity_calculation_method: item.quantity_calculation_method || "",
     calculation_breakdown: item.calculation_breakdown || [],
+    evidence: item.evidence || [],
   };
 }
 
@@ -1710,6 +1762,7 @@ function mapDraftPackingLine(line) {
     netWeightMethod = "default_90_percent_of_gross";
   }
   return {
+    merge_key: line.merge_key || "",
     description_en: line.description_en || "",
     quantity: quantity.quantity,
     unit: quantity.unit,
@@ -1735,11 +1788,193 @@ function mapDraftPackingLine(line) {
     set_basis: line.set_basis || "",
     quantity_calculation_method: line.quantity_calculation_method || "",
     calculation_breakdown: line.calculation_breakdown || [],
+    evidence: line.evidence || [],
   };
+}
+
+function sourceRowForCurrent(originalRows, currentRow, index) {
+  if (currentRow.merge_key) {
+    const matched = originalRows.find((row) => row.merge_key === currentRow.merge_key);
+    if (matched) return matched;
+  }
+  return originalRows[index] || {};
+}
+
+function mergeCurrentItems(originalRows, currentRows) {
+  return currentRows.map((row, index) => {
+    const merged = cloneJson(sourceRowForCurrent(originalRows, row, index));
+    return {
+      ...merged,
+      merge_key: row.merge_key || merged.merge_key || "",
+      description_en: row.description_en,
+      description_cn: row.description_cn,
+      spec: row.spec || merged.spec || "",
+      hs_code: row.hs_code,
+      quantity: row.quantity,
+      pipkg_quantity: row.quantity,
+      unit: row.unit,
+      pipkg_quantity_unit: row.unit,
+      unit_price: row.unit_price,
+      pipkg_unit_price: row.unit_price,
+      amount: row.amount,
+      amount_calculated: row.amount,
+      material: row.material,
+      use: row.use,
+      confidence: row.confidence || merged.confidence || "manual",
+      container_breakdown: row.container_breakdown || merged.container_breakdown || [],
+      quantity_source: row.quantity_source ?? merged.quantity_source ?? null,
+      quantity_source_unit: row.quantity_source_unit || merged.quantity_source_unit || row.unit,
+      piece_length_m: row.piece_length_m ?? merged.piece_length_m ?? null,
+      piece_count_calculated: row.piece_count_calculated ?? merged.piece_count_calculated ?? null,
+      source_total_length_m: row.source_total_length_m ?? merged.source_total_length_m ?? null,
+      piece_count_source: row.piece_count_source ?? merged.piece_count_source ?? null,
+      pieces_per_package: row.pieces_per_package ?? merged.pieces_per_package ?? null,
+      package_count_source: row.package_count_source ?? merged.package_count_source ?? null,
+      package_count_calculated: row.package_count_calculated ?? merged.package_count_calculated ?? null,
+      loose_piece_count: row.loose_piece_count ?? merged.loose_piece_count ?? null,
+      set_basis: row.set_basis || merged.set_basis || "",
+      quantity_calculation_method: row.quantity_calculation_method || merged.quantity_calculation_method || "manual_review",
+      calculation_breakdown: row.calculation_breakdown || merged.calculation_breakdown || [],
+      evidence: row.evidence || merged.evidence || [],
+    };
+  });
+}
+
+function mergeCurrentPackingLines(originalRows, currentRows) {
+  return currentRows.map((row, index) => {
+    const merged = cloneJson(sourceRowForCurrent(originalRows, row, index));
+    return {
+      ...merged,
+      merge_key: row.merge_key || merged.merge_key || "",
+      description_en: row.description_en,
+      hs_code: row.hs_code,
+      quantity: row.quantity,
+      pipkg_quantity: row.quantity,
+      unit: row.unit,
+      pipkg_quantity_unit: row.unit,
+      packages: row.packages,
+      gross_weight: row.gross_weight,
+      gross_weight_calculated: row.gross_weight,
+      net_weight: row.net_weight,
+      net_weight_calculated: row.net_weight,
+      net_weight_method: row.net_weight_method || merged.net_weight_method || "",
+      cbm: row.cbm,
+      cbm_calculated: row.cbm,
+      confidence: row.confidence || merged.confidence || "manual",
+      container_breakdown: row.container_breakdown || merged.container_breakdown || [],
+      quantity_source: row.quantity_source ?? merged.quantity_source ?? null,
+      quantity_source_unit: row.quantity_source_unit || merged.quantity_source_unit || row.unit,
+      piece_length_m: row.piece_length_m ?? merged.piece_length_m ?? null,
+      piece_count_calculated: row.piece_count_calculated ?? merged.piece_count_calculated ?? null,
+      source_total_length_m: row.source_total_length_m ?? merged.source_total_length_m ?? null,
+      piece_count_source: row.piece_count_source ?? merged.piece_count_source ?? null,
+      pieces_per_package: row.pieces_per_package ?? merged.pieces_per_package ?? null,
+      package_count_source: row.package_count_source ?? merged.package_count_source ?? null,
+      package_count_calculated: row.package_count_calculated ?? merged.package_count_calculated ?? null,
+      loose_piece_count: row.loose_piece_count ?? merged.loose_piece_count ?? null,
+      set_basis: row.set_basis || merged.set_basis || "",
+      quantity_calculation_method: row.quantity_calculation_method || merged.quantity_calculation_method || "manual_review",
+      calculation_breakdown: row.calculation_breakdown || merged.calculation_breakdown || [],
+      evidence: row.evidence || merged.evidence || [],
+    };
+  });
+}
+
+function currentFieldCopy(name) {
+  return state.current?.fields?.[name] ? cloneJson(state.current.fields[name]) : undefined;
+}
+
+function syncCurrentGroup() {
+  if (!state.current || state.activeGroupIndex < 0) return;
+  const groups = state.current.shipment_groups || [];
+  const group = groups[state.activeGroupIndex];
+  if (!group) return;
+
+  const fieldMap = {
+    invoice_no: "invoice_no",
+    invoice_date: "invoice_date",
+    bill_of_lading_no: "bill_of_lading_no",
+    shipper_block: "shipper_block",
+    consignee_company: "consignee_block",
+    transport: "transport",
+    origin_country: "origin_country",
+    loading_port: "loading_port",
+    destination_port: "destination_port",
+    trade_term: "trade_term",
+    payment_term: "payment_term",
+    gross_weight: "gross_weight",
+  };
+  Object.entries(fieldMap).forEach(([fieldName, groupName]) => {
+    const value = currentFieldCopy(fieldName);
+    if (value) group[groupName] = value;
+  });
+
+  group.si = group.si || {};
+  const siTemplate = currentFieldCopy("si_template");
+  const containerQty = currentFieldCopy("container_qty");
+  const vesselVoyage = currentFieldCopy("vessel_voyage");
+  if (siTemplate) group.si.si_template = valueFromDraftField(siTemplate);
+  if (containerQty) group.si.container_qty = containerQty;
+  if (vesselVoyage) group.si.vessel_voyage = vesselVoyage;
+
+  group.items = mergeCurrentItems(group.items || [], state.current.items || []);
+  group.packing_lines = mergeCurrentPackingLines(group.packing_lines || [], state.current.packing_lines || []);
+  group.issues = cloneJson(state.current.issues || []);
+  group.packing_reconciliation = cloneJson(state.current.packing_reconciliation || {});
+  group.frontend_saved_at = new Date().toISOString();
+  group.totals = group.totals || {};
+  group.totals.quantity = (state.current.items || []).reduce((sum, item) => sum + Number(item.quantity || 0), 0);
+  group.totals.amount = Number((state.current.items || []).reduce((sum, item) => sum + Number(item.amount || 0), 0).toFixed(2));
+  group.totals.packages = (state.current.packing_lines || []).reduce((sum, line) => sum + Number(line.packages || 0), 0);
+  group.totals.net_weight = (state.current.packing_lines || []).reduce((sum, line) => sum + Number(line.net_weight || 0), 0);
+  groups[state.activeGroupIndex] = group;
+}
+
+function buildEditableDraftPayload() {
+  syncCurrentGroup();
+  const payload = cloneJson(state.draftPayload || {});
+  payload.case_no = payload.case_no || state.current?.base_case_no || state.current?.case?.case_no || "IMPORTED";
+  payload.frontend_saved_at = new Date().toISOString();
+  payload.frontend_save_version = 1;
+  payload.last_active_group_id = state.current?.active_group_id || "";
+  const groups = state.current?.shipment_groups || [];
+  if (groups.length) {
+    payload.shipment_groups = cloneJson(groups);
+  } else {
+    payload.fields = cloneJson(state.current?.fields || {});
+    payload.items = mergeCurrentItems(payload.items || [], state.current?.items || []);
+    payload.packing_lines = mergeCurrentPackingLines(payload.packing_lines || [], state.current?.packing_lines || []);
+    payload.issues = cloneJson(state.current?.issues || []);
+    payload.totals = cloneJson(state.current?.bl_totals || {});
+  }
+  return payload;
+}
+
+async function persistCurrentDraft() {
+  if (!state.current) return;
+  try {
+    const payload = buildEditableDraftPayload();
+    const rawText = JSON.stringify(payload, null, 2);
+    const sourceName = state.draftFileName || `${payload.case_no || "整理稿"}.json`;
+    const record = await saveDraftHistory(rawText, payload, sourceName, state.activeHistoryId);
+    state.activeHistoryId = record.id;
+    state.draftPayload = payload;
+    state.draftFileName = record.sourceName;
+    qs("draftText").value = rawText;
+    qs("importStatus").textContent = `修改已保存到本机历史：${record.caseNo}`;
+    setSaveState("saved");
+    setStatus("已保存");
+    renderGroups();
+  } catch (error) {
+    setSaveState("error");
+    setStatus("保存失败");
+    qs("importStatus").textContent = `保存失败：${error.message}`;
+  }
 }
 
 function applyShipmentGroup(group, index = 0) {
   if (!state.current) return;
+  if (state.activeGroupIndex >= 0) syncCurrentGroup();
   state.activeGroupIndex = index;
   state.current.active_group_id = group.group_id || valueFromDraftField(group.bill_of_lading_no) || "";
   const mapped = {
@@ -1750,6 +1985,7 @@ function applyShipmentGroup(group, index = 0) {
     shipper_block: partyFieldFromDraft(group, "shipper"),
     consignee_company: partyFieldFromDraft(group, "consignee"),
     transport: group.transport,
+    origin_country: group.origin_country,
     loading_port: group.loading_port,
     destination_port: group.destination_port,
     trade_term: firstDraftField(group, ["trade_term", "terms_of_delivery", "delivery_term", "incoterm"]),
@@ -1794,15 +2030,20 @@ function applyShipmentGroup(group, index = 0) {
 }
 
 function applyDraft(payload) {
+  const draft = cloneJson(payload);
+  state.activeGroupIndex = -1;
+  state.activeHistoryId = "";
+  state.draftPayload = draft;
+  setSaveState("idle");
   const incomingInvoice = String(
-    valueFromDraftField(payload.fields?.invoice_no)
-      || valueFromDraftField(payload.shipment_groups?.[0]?.invoice_no)
-      || payload.case_no
+    valueFromDraftField(draft.fields?.invoice_no)
+      || valueFromDraftField(draft.shipment_groups?.[0]?.invoice_no)
+      || draft.case_no
       || "",
   ).trim().toUpperCase();
   const currentInvoice = String(getField("invoice_no") || "").trim().toUpperCase();
   if (state.current && incomingInvoice && currentInvoice && incomingInvoice !== currentInvoice) {
-    const transport = valueFromDraftField(payload.shipment_groups?.[0]?.transport) || valueFromDraftField(payload.fields?.transport);
+    const transport = valueFromDraftField(draft.shipment_groups?.[0]?.transport) || valueFromDraftField(draft.fields?.transport);
     state.current = {
       case: { case_no: "IMPORTED", shipment_type: /EXPRESS|FEDEX/i.test(String(transport || "")) ? "fedex" : "sea" },
       files: [],
@@ -1826,7 +2067,6 @@ function applyDraft(payload) {
       skill_trace: [],
     };
   }
-  const draft = payload;
   if (draft.split_required !== undefined) state.current.split_required = draft.split_required;
   if (draft.pipkg_output_count !== undefined) state.current.pipkg_output_count = draft.pipkg_output_count;
   if (draft.si_output_count !== undefined) state.current.si_output_count = draft.si_output_count;
@@ -1881,7 +2121,9 @@ async function importDraft() {
     applyDraft(payload);
     let historySaved = true;
     try {
-      await saveDraftHistory(text, payload, state.draftFileName || "粘贴导入");
+      const record = await saveDraftHistory(text, state.draftPayload || payload, state.draftFileName || "粘贴导入");
+      state.activeHistoryId = record.id;
+      setSaveState("saved");
     } catch {
       historySaved = false;
     }
@@ -1906,6 +2148,7 @@ function renderAll() {
   renderPacking();
   renderReconciliation();
   renderIssues();
+  updateSaveButton();
 }
 
 async function loadCases() {
@@ -1944,6 +2187,9 @@ async function scanFolder(folder) {
   });
   state.current = payload;
   state.activeGroupIndex = -1;
+  state.activeHistoryId = "";
+  state.draftPayload = null;
+  setSaveState("idle");
   ensureDefaultInvoiceFields();
   if (!state.current.fields.si_template) {
     state.current.fields.si_template = { value: "MSC", confidence: "manual", evidence: [] };
@@ -1958,6 +2204,7 @@ async function validateCurrent() {
   setStatus("校验中");
   if (state.remoteMode) {
     state.current = validateInBrowser(state.current);
+    markDirty();
     setStatus("已校验");
     renderAll();
     return;
@@ -1970,6 +2217,7 @@ async function validateCurrent() {
   } catch {
     state.current = validateInBrowser(state.current);
   }
+  markDirty();
   setStatus("已校验");
   renderAll();
 }
@@ -2052,6 +2300,7 @@ function addItem() {
     source: "manual",
     confidence: "manual",
   });
+  markDirty();
   renderItems();
   renderSummary();
 }
@@ -2070,6 +2319,7 @@ function addPacking() {
     source: "manual",
     confidence: "manual",
   });
+  markDirty();
   renderPacking();
   renderSummary();
 }
@@ -2097,6 +2347,7 @@ function bindActions() {
   });
   qs("clearHistoryButton").addEventListener("click", clearDraftHistory);
   qs("scanButton").addEventListener("click", () => scanFolder(qs("folderInput").value));
+  qs("saveButton").addEventListener("click", persistCurrentDraft);
   qs("validateButton").addEventListener("click", validateCurrent);
   qs("exportButton").addEventListener("click", toggleExportMenu);
   qs("exportMenu").querySelectorAll("[data-export-kind]").forEach((button) => {
@@ -2147,4 +2398,10 @@ window.addEventListener("DOMContentLoaded", async () => {
     setStatus("错误");
     qs("issueList").innerHTML = `<div class="issue-card error"><div class="card-title">启动失败</div><div class="card-meta">${error.message}</div></div>`;
   }
+});
+
+window.addEventListener("beforeunload", (event) => {
+  if (!state.dirty) return;
+  event.preventDefault();
+  event.returnValue = "";
 });

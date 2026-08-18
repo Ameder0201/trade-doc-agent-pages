@@ -55,6 +55,26 @@ button.primary:hover {
   background: var(--accent-strong);
 }
 
+.save-button.dirty {
+  border-color: #d89b3c;
+  background: #fff8e8;
+  color: #8a4f00;
+  font-weight: 700;
+}
+
+.save-button.saved {
+  border-color: #9dcbb9;
+  background: #edf8f3;
+  color: var(--accent-strong);
+  font-weight: 700;
+}
+
+.save-button.save-error {
+  border-color: #f0b6af;
+  background: #fff1ef;
+  color: var(--error);
+}
+
 input,
 select,
 textarea {
@@ -527,6 +547,8 @@ p {
   display: flex;
   gap: 8px;
   align-items: center;
+  flex-wrap: wrap;
+  justify-content: flex-end;
 }
 
 .export-menu-wrap {
