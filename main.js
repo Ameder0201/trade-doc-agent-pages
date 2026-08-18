@@ -47,7 +47,7 @@ const fallbackKnowledge = {
       keyword: "MUKADEM",
       company: "MUKADEM FACTORY FOR THE PRODUCTION OF GLASS",
       address: "AL FARWANIYAH GOVERNORATE, RAI, BLOCK1, STREET IBRAHIM MOHAMMAD AL_JRAIWY, PARCEL 286",
-      contact: "ALI ALSHMERY 00965 65655842",
+      contact: "ALI ALSHMERY +965 9773 4376",
       email: "AILALSHMERY@YAHOO.COM",
     },
     {
