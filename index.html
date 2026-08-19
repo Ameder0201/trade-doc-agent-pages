@@ -4,7 +4,7 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>外贸单证 Agent Demo</title>
-    <link rel="stylesheet" href="./styles.css?v=20260818-fedex-recommendations" />
+    <link rel="stylesheet" href="./styles.css?v=20260819-co-workflow2" />
   </head>
   <body>
     <main class="shell">
@@ -87,6 +87,7 @@
                   <button type="button" data-export-kind="pipkg">导出 PIPKG</button>
                   <button type="button" data-export-kind="si">导出 SI</button>
                   <button type="button" data-export-kind="fedex">导出 FedEx PI</button>
+                  <button type="button" data-export-kind="co">导出 CO</button>
                 </div>
               </div>
             </div>
@@ -94,11 +95,12 @@
 
           <div class="summary-grid" id="caseSummary"></div>
 
-          <div class="shipment-switch" role="group" aria-label="运输类型">
-            <span>运输类型</span>
+          <div class="shipment-switch" role="group" aria-label="制单类型">
+            <span>制单类型</span>
             <div class="segmented-control">
-              <button type="button" data-shipment-type="sea">海运柜</button>
-              <button type="button" data-shipment-type="fedex">FedEx</button>
+              <button type="button" data-workflow-type="pipkg">PIPKG</button>
+              <button type="button" data-workflow-type="fedex">FedEx</button>
+              <button type="button" data-workflow-type="co">CO</button>
             </div>
           </div>
 
@@ -134,10 +136,11 @@
                   <tr>
                     <th>英文品名</th>
                     <th>中文</th>
-                    <th>单价</th>
-                    <th>Quantity / m</th>
+                    <th data-co-only>规格</th>
+                    <th data-commercial-only>单价</th>
+                    <th id="quantityHeader">Quantity / m</th>
                     <th>单位</th>
-                    <th>总价</th>
+                    <th data-commercial-only>总价</th>
                     <th>HS code</th>
                     <th data-fedex-only>材质</th>
                     <th data-fedex-only>用途</th>
@@ -188,6 +191,7 @@
       </section>
     </main>
     <script src="./exceljs.min.js"></script>
-    <script src="./main.js?v=20260818-mukadem-contact"></script>
+    <script src="./fflate.min.js"></script>
+    <script src="./main.js?v=20260819-co-workflow2"></script>
   </body>
 </html>

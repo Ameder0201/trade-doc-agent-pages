@@ -607,7 +607,7 @@ p {
 
 .segmented-control {
   display: grid;
-  grid-template-columns: repeat(2, minmax(92px, 1fr));
+  grid-template-columns: repeat(3, minmax(84px, 1fr));
   border: 1px solid var(--line);
   border-radius: 6px;
   overflow: hidden;
@@ -630,8 +630,13 @@ p {
   color: #fff;
 }
 
-body.shipment-fedex [data-sea-only],
-body.shipment-sea [data-fedex-only] {
+body.workflow-fedex [data-sea-only],
+body.workflow-co [data-sea-only],
+body.workflow-pipkg [data-fedex-only],
+body.workflow-co [data-fedex-only],
+body.workflow-pipkg [data-co-only],
+body.workflow-fedex [data-co-only],
+body.workflow-co [data-commercial-only] {
   display: none;
 }
 
@@ -859,8 +864,12 @@ table {
   width: 110px;
 }
 
-body.shipment-fedex #itemsTable {
+body.workflow-fedex #itemsTable {
   min-width: 1420px;
+}
+
+body.workflow-co #itemsTable {
+  min-width: 980px;
 }
 
 .hs-reference-cell {
