@@ -601,7 +601,8 @@ function applyFedexHsKnowledge(data) {
 
 function knowledgeStatusText() {
   const count = state.localHsKnowledge.length;
-  qs("knowledgeStatus").textContent = `本机已确认 ${count} 条；正式参考 ${state.knowledge.fedex_products?.length || 0} 条`;
+  const status = qs("knowledgeStatus");
+  if (status) status.textContent = `本机已确认 ${count} 条；正式参考 ${state.knowledge.fedex_products?.length || 0} 条`;
 }
 
 async function refreshLocalHsKnowledge() {
@@ -705,43 +706,6 @@ function rejectHsReference(rowIndex) {
   renderItems();
   renderSummary();
   renderIssues();
-}
-
-async function importKnowledgeFile() {
-  const file = qs("knowledgeFile").files?.[0];
-  if (!file) {
-    qs("knowledgeStatus").textContent = "请先选择知识增量 JSON 文件";
-    return;
-  }
-  try {
-    const payload = JSON.parse(await file.text());
-    const entries = Array.isArray(payload) ? payload : payload.entries || payload.knowledge_feedback || [];
-    const valid = entries.filter((entry) => entry?.id && entry?.hs_code && (entry.description_en || entry.description_cn));
-    await writeLocalHsKnowledge(valid);
-    await refreshLocalHsKnowledge();
-    if (state.current) {
-      applyFedexHsKnowledge(state.current);
-      renderAll();
-    }
-    qs("knowledgeStatus").textContent = `已导入 ${valid.length} 条；本机共 ${state.localHsKnowledge.length} 条`;
-  } catch (error) {
-    qs("knowledgeStatus").textContent = `知识增量导入失败：${error.message}`;
-  }
-}
-
-function exportLocalKnowledge() {
-  const payload = {
-    schema_version: 1,
-    exported_at: new Date().toISOString(),
-    entries: state.localHsKnowledge,
-  };
-  const blob = new Blob([JSON.stringify(payload, null, 2)], { type: "application/json" });
-  const url = URL.createObjectURL(blob);
-  const anchor = document.createElement("a");
-  anchor.href = url;
-  anchor.download = `fedex-hs-knowledge-${localDateParts().compact}.json`;
-  anchor.click();
-  window.setTimeout(() => URL.revokeObjectURL(url), 1000);
 }
 
 function updateSaveButton() {
@@ -1727,10 +1691,10 @@ function ensureFedexDefaultFields() {
 function ensureCoDefaultFields() {
   if (!state.current || workflowType() !== "co") return;
   const destination = String(getField("destination_country") || getField("destination_port") || "").trim();
-  const route = [getField("loading_port") || "CHINA", destination || "DESTINATION", "BY AIR"];
+  const origin = String(getField("loading_port") || getField("origin_country") || "CHINA").trim();
   const defaults = {
     co_exporter_block: coDefaults.exporter,
-    co_transport_route: `FROM ${route[0]} TO ${route[1]} ${route[2]}`.toUpperCase(),
+    co_transport_route: destination ? `FROM ${origin} TO ${destination}`.toUpperCase() : "",
     destination_country: destination,
     co_marks: "N/M",
     total_packages: (state.current.packing_lines || []).reduce((sum, line) => sum + Number(line.packages || 0), 0) || 1,
@@ -3252,19 +3216,43 @@ async function importDraft() {
     } catch {
       historySaved = false;
     }
-    const groupCount = payload.shipment_groups?.length || 0;
-    const importedType = inferDraftShipmentType(payload);
-    const importMessage = importedType === "fedex"
-      ? "已导入 FedEx 整理稿，已刷新基础信息、商品、价格和 HS Code 参考。"
-      : importedType === "co"
-      ? "已识别 CO 整理稿，已刷新出口商、收货人、运输路线、生产商和商品信息。"
-      : groupCount > 1
-      ? `已导入整理稿：识别到 ${groupCount} 个提单组，请在“拆单”页选择要核验的提单。`
-      : "已导入整理稿，已刷新基础信息、PI、PKG 和提单差异核对。";
-    qs("importStatus").textContent = `${importMessage}${historySaved ? " 已保存到历史。" : " 当前浏览器无法保存历史。"}`;
+    qs("importStatus").textContent = historySaved ? "已导入" : "已导入（历史未保存）";
   } catch (error) {
     qs("importStatus").textContent = `导入失败：${error.message}`;
   }
+}
+
+function clearDraftInput() {
+  qs("draftText").value = "";
+  qs("draftFile").value = "";
+  qs("importStatus").textContent = "";
+  state.draftFileName = "";
+  qs("draftText").focus();
+}
+
+function renderSelectedSourceFiles() {
+  const files = [...(qs("sourceFiles").files || [])];
+  const list = qs("selectedSourceFiles");
+  list.replaceChildren();
+  list.hidden = files.length === 0;
+  files.forEach((file) => {
+    const row = document.createElement("span");
+    row.textContent = file.name;
+    list.append(row);
+  });
+  qs("sourceExtractStatus").textContent = "";
+}
+
+function clearSourceFiles() {
+  qs("sourceFiles").value = "";
+  qs("selectedSourceFiles").replaceChildren();
+  qs("selectedSourceFiles").hidden = true;
+  qs("sourceExtractStatus").textContent = "";
+}
+
+function requestSourceExtraction() {
+  const count = qs("sourceFiles").files?.length || 0;
+  qs("sourceExtractStatus").textContent = count ? "提取接口待接入" : "请选择资料文件";
 }
 
 function renderAll() {
@@ -3287,17 +3275,24 @@ async function loadCases() {
   try {
     const payload = await api("/api/cases");
     state.remoteMode = false;
+    qs("folderScanPanel").hidden = false;
+    qs("sourceExtractPanel").hidden = true;
+    qs("folderInput").disabled = false;
+    qs("scanButton").disabled = false;
     state.cases = payload.cases;
     if (state.cases.length && !qs("folderInput").value) qs("folderInput").value = state.cases[0].path;
     setStatus("就绪");
   } catch {
     state.remoteMode = true;
     state.cases = [];
-    qs("folderInput").value = "远程模式：请在“整理稿导入”上传 JSON";
+    qs("folderScanPanel").hidden = true;
+    qs("sourceExtractPanel").hidden = false;
+    qs("folderInput").value = "远程模式：请在“导入”中输入 JSON";
     qs("folderInput").disabled = true;
     qs("scanButton").disabled = true;
     setStatus("远程模式");
     qs("draftImportPanel").open = true;
+    qs("sourceExtractPanel").open = true;
   }
   renderCases();
 }
@@ -3367,6 +3362,116 @@ async function exportCurrent() {
   return exportByKind("pipkg");
 }
 
+function normalizePipkgDescription(value) {
+  return normalizeProductText(
+    String(value || "").replace(/\bHS\s*CODE\s*:?\s*[A-Z0-9.]+/gi, " "),
+  );
+}
+
+function normalizePipkgUnit(value) {
+  const unit = String(value || "").trim().toUpperCase();
+  const aliases = {
+    PC: "PCS",
+    PIECE: "PCS",
+    PIECES: "PCS",
+    METER: "M",
+    METERS: "M",
+    METRE: "M",
+    METRES: "M",
+    M2: "SQM",
+    "M²": "SQM",
+    SQUAREMETER: "SQM",
+    SQUAREMETERS: "SQM",
+    KG: "KGS",
+    KILOGRAM: "KGS",
+    KILOGRAMS: "KGS",
+  };
+  return aliases[unit.replace(/\s+/g, "")] || unit;
+}
+
+function pipkgComparisonRows(rows = []) {
+  const aggregated = new Map();
+  rows.forEach((row) => {
+    const description = normalizePipkgDescription(row.description_en || row.description || "") || "未命名商品";
+    const hsCode = normalizeHsCode(row.hs_code);
+    const unit = normalizePipkgUnit(row.unit || row.pipkg_quantity_unit || row.quantity_source_unit);
+    const quantity = Number(firstDefined(row.quantity, row.pipkg_quantity, row.quantity_source, NaN));
+    const key = `${description}|${hsCode}|${unit}`;
+    const current = aggregated.get(key) || {
+      description,
+      hsCode,
+      unit,
+      quantity: 0,
+      hasQuantity: true,
+    };
+    if (Number.isFinite(quantity)) current.quantity += quantity;
+    else current.hasQuantity = false;
+    aggregated.set(key, current);
+  });
+  return aggregated;
+}
+
+function pipkgRowLabel(row) {
+  const quantity = row.hasQuantity
+    ? new Intl.NumberFormat("en-US", { maximumFractionDigits: 8 }).format(row.quantity)
+    : "数量未填写";
+  return [
+    row.description,
+    row.hsCode ? `HS ${row.hsCode}` : "HS 未填写",
+    `${quantity} ${row.unit || "单位未填写"}`,
+  ].join(" / ");
+}
+
+function comparePipkgContent(data) {
+  const piRows = pipkgComparisonRows(data.items || []);
+  const pkgRows = pipkgComparisonRows(data.packing_lines || []);
+  const mismatches = [];
+  const keys = new Set([...piRows.keys(), ...pkgRows.keys()]);
+  keys.forEach((key) => {
+    const piRow = piRows.get(key);
+    const pkgRow = pkgRows.get(key);
+    if (!piRow) {
+      mismatches.push(`PI 缺少：${pipkgRowLabel(pkgRow)}`);
+      return;
+    }
+    if (!pkgRow) {
+      mismatches.push(`PKG 缺少：${pipkgRowLabel(piRow)}`);
+      return;
+    }
+    if (!piRow.hasQuantity || !pkgRow.hasQuantity) {
+      mismatches.push(`数量未完整：${piRow.description}`);
+      return;
+    }
+    const tolerance = Math.max(0.000001, Math.abs(piRow.quantity) * 0.00000001);
+    if (Math.abs(piRow.quantity - pkgRow.quantity) > tolerance) {
+      mismatches.push(
+        `数量不同：${piRow.description} / PI ${piRow.quantity} ${piRow.unit || ""} / PKG ${pkgRow.quantity} ${pkgRow.unit || ""}`,
+      );
+    }
+  });
+  return mismatches;
+}
+
+function confirmPipkgMismatch(mismatches) {
+  if (!mismatches.length) return Promise.resolve(true);
+  const dialog = qs("piPkgMismatchDialog");
+  if (!dialog?.showModal) {
+    return Promise.resolve(window.confirm(`PI 与 PKG 内容不一致：\n\n${mismatches.join("\n")}\n\n是否继续导出？`));
+  }
+  const list = qs("piPkgMismatchList");
+  list.replaceChildren();
+  mismatches.forEach((message) => {
+    const item = document.createElement("li");
+    item.textContent = message;
+    list.append(item);
+  });
+  return new Promise((resolve) => {
+    dialog.returnValue = "";
+    dialog.addEventListener("close", () => resolve(dialog.returnValue === "continue"), { once: true });
+    dialog.showModal();
+  });
+}
+
 async function exportByKind(kind) {
   if (!state.current) return;
   qs("exportMenu").hidden = true;
@@ -3386,6 +3491,13 @@ async function exportByKind(kind) {
       <span>当前还有 ${blockingIssues.length} 个阻塞问题，请先处理拆单、商品或必填字段后再导出。</span>
     `;
     return;
+  }
+  if (mode === "pipkg" && kind === "pipkg") {
+    const mismatches = comparePipkgContent(state.current);
+    if (mismatches.length && !(await confirmPipkgMismatch(mismatches))) {
+      setStatus("待修改");
+      return;
+    }
   }
   setStatus("导出中");
   if (state.remoteMode) {
@@ -3505,8 +3617,6 @@ function bindActions() {
     renderDraftHistory();
   });
   qs("clearHistoryButton").addEventListener("click", clearDraftHistory);
-  qs("importKnowledgeButton").addEventListener("click", importKnowledgeFile);
-  qs("exportKnowledgeButton").addEventListener("click", exportLocalKnowledge);
   qs("scanButton").addEventListener("click", () => scanFolder(qs("folderInput").value));
   qs("saveButton").addEventListener("click", persistCurrentDraft);
   qs("validateButton").addEventListener("click", validateCurrent);
@@ -3523,6 +3633,10 @@ function bindActions() {
   qs("addItem").addEventListener("click", addItem);
   qs("addPacking").addEventListener("click", addPacking);
   qs("importDraftButton").addEventListener("click", importDraft);
+  qs("clearDraftButton").addEventListener("click", clearDraftInput);
+  qs("sourceFiles").addEventListener("change", renderSelectedSourceFiles);
+  qs("clearSourceFilesButton").addEventListener("click", clearSourceFiles);
+  qs("startExtractionButton").addEventListener("click", requestSourceExtraction);
   qs("draftFile").addEventListener("change", async (event) => {
     const file = event.target.files?.[0];
     if (!file) return;

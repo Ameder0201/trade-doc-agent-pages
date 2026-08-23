@@ -311,7 +311,8 @@ p {
   text-align: center;
 }
 
-.draft-import-panel {
+.draft-import-panel,
+.source-extract-panel {
   margin-bottom: 14px;
   border: 1px solid var(--line);
   border-radius: 7px;
@@ -319,6 +320,7 @@ p {
 }
 
 .draft-import-panel summary,
+.source-extract-panel summary,
 .reconciliation-panel summary {
   min-height: 42px;
   padding: 10px 12px;
@@ -327,7 +329,8 @@ p {
   font-weight: 700;
 }
 
-.draft-import-panel .import-box {
+.draft-import-panel .import-box,
+.source-extract-box {
   padding: 0 12px 12px;
 }
 
@@ -793,6 +796,10 @@ body.workflow-co [data-commercial-only] {
   overflow-wrap: anywhere;
 }
 
+.source-note:empty {
+  display: none;
+}
+
 .table-wrap {
   overflow-x: auto;
   border: 1px solid var(--line);
@@ -819,32 +826,102 @@ body.workflow-co [data-commercial-only] {
   gap: 10px;
 }
 
-.knowledge-import-panel {
-  border-top: 1px solid var(--line);
-  padding-top: 8px;
-}
-
-.knowledge-import-panel summary {
-  cursor: pointer;
-  color: var(--ink);
-  font-size: 13px;
-  font-weight: 700;
-}
-
-.knowledge-import-box {
+.source-extract-box {
   display: grid;
-  gap: 8px;
-  padding-top: 9px;
+  gap: 10px;
 }
 
-.knowledge-actions {
-  justify-content: flex-start;
+.import-actions {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  justify-content: stretch;
+}
+
+.selected-source-files {
+  display: grid;
+  gap: 4px;
+  max-height: 132px;
+  overflow-y: auto;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: #fff;
+  padding: 8px;
+}
+
+.selected-source-files[hidden] {
+  display: none;
+}
+
+.selected-source-files span {
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.35;
+  overflow-wrap: anywhere;
 }
 
 .import-box textarea {
   min-height: 220px;
   font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
   font-size: 12px;
+}
+
+.review-dialog {
+  width: min(560px, calc(100vw - 28px));
+  max-height: min(680px, calc(100vh - 28px));
+  padding: 0;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #fff;
+  color: var(--ink);
+  box-shadow: 0 18px 48px rgba(24, 33, 31, 0.22);
+}
+
+.review-dialog::backdrop {
+  background: rgba(24, 33, 31, 0.42);
+}
+
+.review-dialog form {
+  display: grid;
+  max-height: inherit;
+}
+
+.review-dialog-head,
+.review-dialog-actions {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 12px 14px;
+}
+
+.review-dialog-head {
+  border-bottom: 1px solid var(--line);
+}
+
+.review-dialog-head h2 {
+  font-size: 17px;
+}
+
+.review-dialog-body {
+  overflow-y: auto;
+  padding: 14px;
+}
+
+.review-dialog-body ul {
+  display: grid;
+  gap: 8px;
+  margin: 0;
+  padding-left: 20px;
+}
+
+.review-dialog-body li {
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+}
+
+.review-dialog-actions {
+  justify-content: flex-end;
+  border-top: 1px solid var(--line);
 }
 
 table {

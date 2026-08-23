@@ -4,7 +4,7 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>外贸单证 Agent Demo</title>
-    <link rel="stylesheet" href="./styles.css?v=20260819-co-workflow2" />
+    <link rel="stylesheet" href="./styles.css?v=20260823-import-match" />
   </head>
   <body>
     <main class="shell">
@@ -34,31 +34,45 @@
 
           <div class="source-view active" id="sourceViewImport">
             <details class="draft-import-panel" id="draftImportPanel">
-              <summary>整理稿导入</summary>
+              <summary>导入</summary>
               <div class="import-box">
-                <label class="input-label" for="draftFile">上传整理稿 JSON 文件</label>
+                <label class="input-label" for="draftFile">JSON 文件</label>
                 <input id="draftFile" type="file" accept=".json,.txt,.md" />
-                <label class="input-label" for="draftText">或粘贴整理稿 JSON</label>
-                <textarea id="draftText" placeholder="粘贴 trade-doc-summary-extractor 输出的 JSON"></textarea>
-                <button id="importDraftButton">导入整理稿</button>
-                <div class="source-note" id="importStatus">支持 shipment_groups、fields、items 和 packing_lines。</div>
-                <details class="knowledge-import-panel">
-                  <summary>HS Code 参考</summary>
-                  <div class="knowledge-import-box">
-                    <input id="knowledgeFile" type="file" accept=".json" />
-                    <div class="button-group knowledge-actions">
-                      <button id="importKnowledgeButton" type="button">导入增量</button>
-                      <button id="exportKnowledgeButton" type="button">导出本机参考</button>
-                    </div>
-                    <div class="source-note" id="knowledgeStatus">本机已确认 0 条</div>
-                  </div>
-                </details>
+                <label class="input-label" for="draftText">输入JSON代码</label>
+                <textarea id="draftText" placeholder="输入JSON代码"></textarea>
+                <div class="button-group import-actions">
+                  <button id="importDraftButton" type="button">导入</button>
+                  <button id="clearDraftButton" type="button">清空</button>
+                </div>
+                <div class="source-note" id="importStatus" aria-live="polite"></div>
               </div>
             </details>
-            <label class="input-label" for="folderInput">资料目录</label>
-            <div class="path-row">
-              <input id="folderInput" type="text" />
-              <button id="scanButton">扫描</button>
+
+            <details class="source-extract-panel" id="sourceExtractPanel" hidden>
+              <summary>资料提取</summary>
+              <div class="source-extract-box">
+                <label class="input-label" for="sourceFiles">资料文件</label>
+                <input
+                  id="sourceFiles"
+                  type="file"
+                  accept=".pdf,.xlsx,.xls,.xlsm,.docx,.doc,.jpg,.jpeg,.png,.webp,.txt,.json"
+                  multiple
+                />
+                <div class="selected-source-files" id="selectedSourceFiles" hidden></div>
+                <div class="button-group import-actions">
+                  <button id="startExtractionButton" type="button">提取</button>
+                  <button id="clearSourceFilesButton" type="button">清空</button>
+                </div>
+                <div class="source-note" id="sourceExtractStatus" aria-live="polite"></div>
+              </div>
+            </details>
+
+            <div id="folderScanPanel">
+              <label class="input-label" for="folderInput">资料目录</label>
+              <div class="path-row">
+                <input id="folderInput" type="text" />
+                <button id="scanButton">扫描</button>
+              </div>
             </div>
             <div class="case-list" id="caseList"></div>
 
@@ -190,8 +204,24 @@
         </aside>
       </section>
     </main>
+
+    <dialog class="review-dialog" id="piPkgMismatchDialog" aria-labelledby="piPkgMismatchTitle">
+      <form method="dialog">
+        <div class="review-dialog-head">
+          <h2 id="piPkgMismatchTitle">PI 与 PKG 不一致</h2>
+          <button class="icon-button" type="submit" value="cancel" aria-label="关闭">×</button>
+        </div>
+        <div class="review-dialog-body">
+          <ul id="piPkgMismatchList"></ul>
+        </div>
+        <div class="review-dialog-actions">
+          <button type="submit" value="cancel">返回修改</button>
+          <button class="primary" type="submit" value="continue">继续导出</button>
+        </div>
+      </form>
+    </dialog>
     <script src="./exceljs.min.js"></script>
     <script src="./fflate.min.js"></script>
-    <script src="./main.js?v=20260819-co-workflow2"></script>
+    <script src="./main.js?v=20260823-import-match"></script>
   </body>
 </html>
