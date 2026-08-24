@@ -1036,24 +1036,28 @@ function preparePipkgTableLayout(pi, pkg) {
   for (let row = 14; row <= 33; row += 1) {
     pkg.unMergeCells(`A${row}:B${row}`);
     copyWorkbookCellStyle(pkg, `C${row}`, `B${row}`);
+    const cbmStyle = cloneWorkbookStyle(pkg.getCell(`G${row}`).style);
+    const rightEdge = cloneWorkbookStyle(pkg.getCell(`H${row}`).style).border?.right;
+    if (rightEdge) cbmStyle.border = { ...(cbmStyle.border || {}), right: rightEdge };
+    pkg.getCell(`G${row}`).style = cbmStyle;
+    setWorkbookCell(pkg, `H${row}`, "");
+    pkg.mergeCells(`G${row}:H${row}`);
   }
-  pkg.getColumn("A").width = 52.05;
-  pkg.getColumn("B").width = 12;
-  pkg.getColumn("C").width = 9;
-  pkg.getColumn("D").width = 9;
-  pkg.getColumn("E").width = 13;
-  pkg.getColumn("F").width = 13;
-  pkg.getColumn("G").width = 13;
-  pkg.getColumn("H").width = 17;
+  pkg.getColumn("A").width = 58;
+  pkg.getColumn("B").width = 13;
+  pkg.getColumn("C").width = 10;
+  pkg.getColumn("D").width = 10;
+  pkg.getColumn("E").width = 14;
+  pkg.getColumn("F").width = 14;
+  pkg.getColumn("G").width = 9.5;
+  pkg.getColumn("H").width = 9.5;
   setWorkbookCell(pkg, "B14", "QUANTITY");
   setWorkbookCell(pkg, "C14", "UNIT");
   setWorkbookCell(pkg, "D14", "PKG");
   setWorkbookCell(pkg, "E14", "G.W.(KGS)");
   setWorkbookCell(pkg, "F14", "N.W.(KGS)");
   setWorkbookCell(pkg, "G14", "TTL CBM");
-  setWorkbookCell(pkg, "H14", "HS CODE");
   setWorkbookCell(pkg, "C33", "");
-  setWorkbookCell(pkg, "H33", "");
   for (let row = 14; row <= 33; row += 1) setWorkbookCell(pkg, `I${row}`, "");
   pkg.pageSetup.printArea = "A1:H35";
 }
@@ -1163,7 +1167,6 @@ async function exportPipkgInBrowser(data) {
     setWorkbookCell(pkg, `E${row}`, line.gross_weight === "" ? "" : values.E);
     setWorkbookCell(pkg, `F${row}`, line.net_weight === "" ? "" : values.F);
     setWorkbookCell(pkg, `G${row}`, line.cbm === "" ? "" : values.G);
-    setWorkbookCell(pkg, `H${row}`, line.hs_code || "");
     Object.keys(packingTotals).forEach((column) => {
       packingTotals[column] += values[column];
     });
