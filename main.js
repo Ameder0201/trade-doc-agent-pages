@@ -791,18 +791,65 @@ function fieldValue(data, name, fallback = "") {
   return data?.fields?.[name]?.value ?? fallback;
 }
 
+function issueRowTarget(issue, data) {
+  const field = String(issue.field || "");
+  const match = field.match(/^(items|packing_lines)\[(\d+)\](?:\.([^.[\]]+))?/);
+  if (!match) return null;
+  const [, tableName, rowText, key = ""] = match;
+  const rowIndex = Number(rowText);
+  const row = data?.[tableName]?.[rowIndex];
+  return { tableName, rowIndex, key, row, exists: Boolean(row) };
+}
+
+function isMissingPositiveNumber(value) {
+  if (value === "" || value === null || value === undefined) return true;
+  const number = Number(value);
+  return !Number.isFinite(number) || number <= 0;
+}
+
 function extractionIssueIsCurrent(issue, data) {
+  const issueType = String(issue.type || "");
   const reconciliationIssueKeys = {
     cbm_source_difference: "cbm",
     packing_cbm_differs_from_bl: "cbm",
     gross_weight_source_difference: "gross_weight",
     packing_gross_differs_from_bl: "gross_weight",
   };
-  const reconciliationKey = reconciliationIssueKeys[String(issue.type || "")];
+  const reconciliationKey = reconciliationIssueKeys[issueType];
   if (reconciliationKey && data.packing_reconciliation?.[reconciliationKey]) return false;
-  const match = String(issue.field || "").match(/^(items|packing_lines)\[(\d+)\](?:\.|$)/);
-  if (!match) return true;
-  return Number(match[2]) < (data[match[1]] || []).length;
+  if (issueType === "missing_items") return !(data.items || []).length;
+  if (issueType === "multiple_bill_of_lading") {
+    return (data.shipment_groups || []).length > 1 && !data.active_group_id;
+  }
+  if (issueType === "missing_required") {
+    const fieldName = String(issue.field || "").replace(/^fields\./, "");
+    return !String(fieldValue(data, fieldName, "") ?? "").trim();
+  }
+
+  const target = issueRowTarget(issue, data);
+  if (!target) return true;
+  if (!target.exists) return false;
+  const { tableName, row, key } = target;
+  if (["missing_commercial_price", "missing_fedex_price"].includes(issueType)) {
+    return isMissingPositiveNumber(row.unit_price);
+  }
+  if (["missing_commercial_quantity", "invalid_quantity"].includes(issueType)) {
+    return isMissingPositiveNumber(row.quantity);
+  }
+  if (issueType === "missing_hs_code") return !String(row.hs_code || "").trim();
+  if (issueType === "missing_packing_weight") return isMissingPositiveNumber(row.gross_weight);
+  if (issueType === "unconfirmed_ai_price") return row.price_confirmed !== true;
+  if (issueType === "unconfirmed_hs_code_reference") return row.hs_code_reference?.needs_confirmation === true;
+  if (issueType === "amount_mismatch") {
+    const quantity = Number(row.quantity || 0);
+    const unitPrice = Number(row.unit_price || 0);
+    const amount = Number(row.amount || 0);
+    return Math.abs(quantity * unitPrice - amount) > 0.05;
+  }
+  if (issueType.startsWith("missing_") && key) {
+    return row[key] === "" || row[key] === null || row[key] === undefined;
+  }
+  return tableName === "items" || tableName === "packing_lines";
 }
 
 function applyDefaultNetWeights(data) {
@@ -902,7 +949,10 @@ function validateInBrowser(data) {
   const issues = (data.issues || []).filter(
     (issue) => (!issue.source || issue.source === "trade-doc-summary-extractor") && extractionIssueIsCurrent(issue, data),
   );
-  const add = (level, type, message, field) => issues.push({ level, type, message, field, source: "browser-validator" });
+  const add = (level, type, message, field) => {
+    if (issues.some((issue) => issue.type === type && issue.field === field)) return;
+    issues.push({ level, type, message, field, source: "browser-validator" });
+  };
   const fields = data.fields || {};
   if (shipmentType === "sea" && (data.shipment_groups || []).length > 1 && !data.active_group_id) {
     add("error", "multiple_bill_of_lading", `检测到 ${data.shipment_groups.length} 个提单号，需要先在拆单页选择一个提单组再导出 PIPKG`, "shipment_groups");
@@ -933,11 +983,11 @@ function validateInBrowser(data) {
     const expected = Number((quantity * unitPrice).toFixed(2));
     if (shipmentType !== "co" && Math.abs(expected - amount) > 0.05) add("warning", "amount_mismatch", `第 ${index + 1} 行金额不一致：数量*单价=${expected.toFixed(2)}，来源金额=${amount.toFixed(2)}`, `items[${index}].amount`);
     if (!(quantity > 0)) add("error", "invalid_quantity", `第 ${index + 1} 行缺少有效商品数量`, `items[${index}].quantity`);
+    if (shipmentType !== "co" && isMissingPositiveNumber(item.unit_price)) {
+      add("error", shipmentType === "fedex" ? "missing_fedex_price" : "missing_commercial_price", `第 ${index + 1} 行缺少有效商品单价`, `items[${index}].unit_price`);
+    }
     if (shipmentType === "fedex" && normalizeQuantityUnit(item.unit) !== "PCS") {
       add("error", "fedex_quantity_requires_pcs", `第 ${index + 1} 行 FedEx 数量必须核验为 PCS`, `items[${index}].unit`);
-    }
-    if (shipmentType === "fedex" && (item.unit_price === "" || item.unit_price === null || item.unit_price === undefined || !Number.isFinite(unitPrice) || unitPrice < 0)) {
-      add("error", "missing_fedex_price", `第 ${index + 1} 行缺少有效 FedEx 单价`, `items[${index}].unit_price`);
     }
     if (shipmentType === "fedex" && item.unit_price_method === "ai_estimate" && item.price_confirmed !== true) {
       add("error", "unconfirmed_ai_price", `第 ${index + 1} 行使用 AI 估价，必须人工确认或修改`, `items[${index}].unit_price`);
@@ -1954,9 +2004,11 @@ function renderFields() {
           setField("consignee_company", partyBlock(item));
         }
       }
+      state.current = validateInBrowser(state.current);
       markDirty();
       renderFields();
       renderSummary();
+      renderIssues();
       if (code === "CUSTOM") {
         window.requestAnimationFrame(() => {
           grid.querySelector(`[data-party-select="${type}"]`)?.closest(".field-control")?.querySelector("textarea")?.focus();
@@ -1972,9 +2024,11 @@ function renderFields() {
         setField(name, event.target.value);
         if (input) input.value = event.target.value;
       }
+      state.current = validateInBrowser(state.current);
       markDirty();
       input?.focus();
       renderSummary();
+      renderIssues();
     });
   });
   grid.querySelectorAll("[data-field]").forEach((input) => {
@@ -1996,8 +2050,10 @@ function renderFields() {
         const select = grid.querySelector(`[data-choice-select="${name}"]`);
         if (select) select.value = choice;
       }
+      state.current = validateInBrowser(state.current);
       markDirty();
       renderSummary();
+      renderIssues();
     });
   });
 }
@@ -2141,8 +2197,10 @@ function bindTableInputs(tableName) {
         delete state.current.packing_reconciliation?.[key];
         renderReconciliation();
       }
+      state.current = validateInBrowser(state.current);
       markDirty();
       renderSummary();
+      renderIssues();
     });
     input.addEventListener("change", (event) => {
       if (tableName !== "items" || state.current.case?.shipment_type !== "fedex") return;
@@ -3037,6 +3095,8 @@ function buildEditableDraftPayload() {
 async function persistCurrentDraft() {
   if (!state.current) return;
   try {
+    state.current = validateInBrowser(state.current);
+    renderIssues();
     const payload = buildEditableDraftPayload();
     const rawText = JSON.stringify(payload, null, 2);
     const sourceName = state.draftFileName || `${payload.case_no || "整理稿"}.json`;
@@ -3455,22 +3515,28 @@ function comparePipkgContent(data) {
   return mismatches;
 }
 
-function confirmPipkgMismatch(mismatches) {
-  if (!mismatches.length) return Promise.resolve(true);
-  const dialog = qs("piPkgMismatchDialog");
+function confirmExportIssues(issues) {
+  if (!issues.length) return Promise.resolve(true);
+  const dialog = qs("exportIssuesDialog");
   if (!dialog?.showModal) {
-    return Promise.resolve(window.confirm(`PI 与 PKG 内容不一致：\n\n${mismatches.join("\n")}\n\n是否继续导出？`));
+    const messages = issues.map((issue) => issue.message || issue.type || String(issue));
+    return Promise.resolve(window.confirm(`导出前发现问题：\n\n${messages.join("\n")}\n\n是否忽略并继续导出？`));
   }
-  const list = qs("piPkgMismatchList");
+  qs("exportIssuesSummary").textContent = `仍有 ${issues.length} 个问题。点击“导出”将仅本次忽略这些问题。`;
+  const list = qs("exportIssuesList");
   list.replaceChildren();
-  mismatches.forEach((message) => {
+  issues.forEach((issue) => {
     const item = document.createElement("li");
-    item.textContent = message;
+    const title = document.createElement("strong");
+    title.textContent = issue.type || (issue.level === "error" ? "错误" : "提醒");
+    const message = document.createElement("span");
+    message.textContent = issue.message || String(issue);
+    item.append(title, message);
     list.append(item);
   });
   return new Promise((resolve) => {
     dialog.returnValue = "";
-    dialog.addEventListener("close", () => resolve(dialog.returnValue === "continue"), { once: true });
+    dialog.addEventListener("close", () => resolve(dialog.returnValue === "export"), { once: true });
     dialog.showModal();
   });
 }
@@ -3487,20 +3553,21 @@ async function exportByKind(kind) {
     return;
   }
   await validateCurrent();
-  const blockingIssues = state.current.issues.filter((issue) => issue.level === "error");
-  if (blockingIssues.length) {
-    qs("exportBox").innerHTML = `
-      <strong>导出已暂停</strong>
-      <span>当前还有 ${blockingIssues.length} 个阻塞问题，请先处理拆单、商品或必填字段后再导出。</span>
-    `;
-    return;
-  }
+  const exportIssues = state.current.issues
+    .filter((issue) => ["error", "warning"].includes(issue.level))
+    .map((issue) => ({ ...issue }));
   if (mode === "pipkg" && kind === "pipkg") {
     const mismatches = comparePipkgContent(state.current);
-    if (mismatches.length && !(await confirmPipkgMismatch(mismatches))) {
-      setStatus("待修改");
-      return;
-    }
+    mismatches.forEach((message) => exportIssues.push({
+      level: "warning",
+      type: "pipkg_content_mismatch",
+      message,
+    }));
+  }
+  if (exportIssues.length && !(await confirmExportIssues(exportIssues))) {
+    qs("exportBox").innerHTML = `<strong>已取消导出</strong><span>修改问题后可再次导出。</span>`;
+    setStatus("待修改");
+    return;
   }
   setStatus("导出中");
   if (state.remoteMode) {

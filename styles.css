@@ -907,6 +907,12 @@ body.workflow-co [data-commercial-only] {
   padding: 14px;
 }
 
+.review-dialog-body p {
+  margin: 0 0 12px;
+  color: var(--muted);
+  line-height: 1.45;
+}
+
 .review-dialog-body ul {
   display: grid;
   gap: 8px;
@@ -915,8 +921,18 @@ body.workflow-co [data-commercial-only] {
 }
 
 .review-dialog-body li {
+  display: grid;
+  gap: 3px;
   line-height: 1.45;
   overflow-wrap: anywhere;
+}
+
+.review-dialog-body li strong {
+  font-size: 13px;
+}
+
+.review-dialog-body li span {
+  color: var(--muted);
 }
 
 .review-dialog-actions {

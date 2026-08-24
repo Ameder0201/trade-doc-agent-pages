@@ -4,7 +4,7 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>外贸单证 Agent Demo</title>
-    <link rel="stylesheet" href="./styles.css?v=20260824-co-name-align" />
+    <link rel="stylesheet" href="./styles.css?v=20260824-export-review" />
   </head>
   <body>
     <main class="shell">
@@ -205,23 +205,24 @@
       </section>
     </main>
 
-    <dialog class="review-dialog" id="piPkgMismatchDialog" aria-labelledby="piPkgMismatchTitle">
+    <dialog class="review-dialog" id="exportIssuesDialog" aria-labelledby="exportIssuesTitle">
       <form method="dialog">
         <div class="review-dialog-head">
-          <h2 id="piPkgMismatchTitle">PI 与 PKG 不一致</h2>
+          <h2 id="exportIssuesTitle">导出前发现问题</h2>
           <button class="icon-button" type="submit" value="cancel" aria-label="关闭">×</button>
         </div>
         <div class="review-dialog-body">
-          <ul id="piPkgMismatchList"></ul>
+          <p id="exportIssuesSummary"></p>
+          <ul id="exportIssuesList"></ul>
         </div>
         <div class="review-dialog-actions">
-          <button type="submit" value="cancel">返回修改</button>
-          <button class="primary" type="submit" value="continue">继续导出</button>
+          <button type="submit" value="cancel">取消</button>
+          <button class="primary" type="submit" value="export">导出</button>
         </div>
       </form>
     </dialog>
     <script src="./exceljs.min.js"></script>
     <script src="./fflate.min.js"></script>
-    <script src="./main.js?v=20260824-co-name-align"></script>
+    <script src="./main.js?v=20260824-export-review"></script>
   </body>
 </html>
