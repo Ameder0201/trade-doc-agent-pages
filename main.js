@@ -1397,7 +1397,7 @@ function coQuantityDisplay(item) {
 
 function coDescriptionBlock(data) {
   const descriptions = (data.items || [])
-    .map((item) => itemNameWithHsCode(item.description_en, item.hs_code))
+    .map((item) => String(item.description_en || "").replace(/\s+/g, " ").trim())
     .filter(Boolean);
   const packages = Number(fieldValue(data, "total_packages", data.totals?.packages || 0));
   let packageUnit = String(fieldValue(data, "co_package_unit", "PACKAGE") || "PACKAGE").trim().toUpperCase();
