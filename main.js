@@ -1397,7 +1397,7 @@ function coQuantityDisplay(item) {
 
 function coDescriptionBlock(data) {
   const descriptions = (data.items || [])
-    .map((item) => [item.description_en, item.spec].filter(Boolean).join(" ").replace(/\s+/g, " ").trim())
+    .map((item) => itemNameWithHsCode(item.description_en, item.hs_code))
     .filter(Boolean);
   const packages = Number(fieldValue(data, "total_packages", data.totals?.packages || 0));
   let packageUnit = String(fieldValue(data, "co_package_unit", "PACKAGE") || "PACKAGE").trim().toUpperCase();
@@ -1426,7 +1426,7 @@ function docxReplacement(value) {
 
 async function exportCoInBrowser(data) {
   if (!window.fflate) throw new Error("CO Word 导出组件未加载");
-  const response = await fetch("./templates/CertificateOfOriginTemplate.docx");
+  const response = await fetch("./templates/CertificateOfOriginTemplate.docx?v=20260824-co-name-align");
   if (!response.ok) throw new Error("无法读取 CO 模板");
   const files = window.fflate.unzipSync(new Uint8Array(await response.arrayBuffer()));
   const documentPath = "word/document.xml";
