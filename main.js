@@ -1481,7 +1481,7 @@ function integerWords(value) {
 }
 
 function coHsCode(value) {
-  return normalizeHsCode(value).slice(0, 6);
+  return normalizeHsCode(value);
 }
 
 function coQuantityDisplay(item) {
@@ -1520,7 +1520,7 @@ function docxReplacement(value) {
 
 async function exportCoInBrowser(data) {
   if (!window.fflate) throw new Error("CO Word 导出组件未加载");
-  const response = await fetch("./templates/CertificateOfOriginTemplate.docx?v=20260824-co-name-align");
+  const response = await fetch("./templates/CertificateOfOriginTemplate.docx?v=20260825-co-full-hs-spacing");
   if (!response.ok) throw new Error("无法读取 CO 模板");
   const files = window.fflate.unzipSync(new Uint8Array(await response.arrayBuffer()));
   const documentPath = "word/document.xml";
