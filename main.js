@@ -1,6 +1,6 @@
 const state = {
   cases: [],
-  knowledge: { companies: [], consignees: [], fedex_products: [] },
+  knowledge: { companies: [], consignees: [], products: [], fedex_products: [] },
   localHsKnowledge: [],
   current: null,
   activeGroupIndex: -1,
@@ -59,6 +59,7 @@ const fallbackKnowledge = {
       email: "AILALSHMERY@YAHOO.COM",
     },
   ],
+  products: [],
   fedex_products: [],
 };
 
@@ -478,7 +479,11 @@ function escapeHtml(value) {
 }
 
 function allFedexHsKnowledge() {
-  const entries = [...(state.localHsKnowledge || []), ...(state.knowledge.fedex_products || [])];
+  const entries = [
+    ...(state.knowledge.products || []),
+    ...(state.localHsKnowledge || []),
+    ...(state.knowledge.fedex_products || []),
+  ];
   const byId = new Map();
   entries.forEach((entry) => {
     if (entry?.id && !byId.has(entry.id)) byId.set(entry.id, entry);
@@ -507,11 +512,14 @@ function matchFedexHsKnowledge(item, destinationCountry = "") {
     const requiredMatch = required.length > 0 && required.every((keyword) => context.includes(keyword));
     const materials = (entry.material_keywords || []).map((value) => String(value).toUpperCase());
     const materialMatch = !materials.length || materials.some((keyword) => context.includes(keyword));
-    const codeMatch = sourceCode && sourceCode === normalizeHsCode(entry.hs_code);
-    if (!aliasMatch && !requiredMatch && !codeMatch) return [];
-    const score = (codeMatch ? 6 : 0) + (aliasMatch ? 4 : 0) + (requiredMatch ? 2 : 0) + (materialMatch ? 1 : -3) + (destination && countries.includes(destination) ? 1 : 0) + (entry.status === "browser_confirmed" ? 2 : 0);
+    if (!aliasMatch && !requiredMatch) return [];
+    const score = (aliasMatch ? 4 : 0)
+      + (requiredMatch ? 2 : 0)
+      + (materialMatch ? 1 : -3)
+      + (destination && countries.includes(destination) ? 1 : 0)
+      + (entry.status === "browser_confirmed" ? 2 : 0)
+      + (entry.confirmation_source === "explicit_user_correction" ? 4 : 0);
     const matchedOn = [];
-    if (codeMatch) matchedOn.push("hs_code");
     if (aliasMatch) matchedOn.push("product_alias");
     if (requiredMatch) matchedOn.push("required_keywords");
     if (materials.length && materialMatch) matchedOn.push("material");
@@ -519,26 +527,46 @@ function matchFedexHsKnowledge(item, destinationCountry = "") {
     return [{ entry, score, matchedOn, aliasMatch, materialMatch }];
   }).sort((left, right) => right.score - left.score);
   if (!matches.length) {
+    const sourceCandidate = sourceCode ? {
+      hs_code: item.hs_code || "",
+      normalized_hs_code: sourceCode,
+      source: "shipment_source_hint",
+      source_scope: "source_document",
+      source_label: "来源文件提示",
+      source_count: 1,
+    } : null;
     return {
-      status: sourceCode ? "source_explicit" : "unresolved",
+      status: sourceCode ? "source_hint" : "unresolved",
       knowledge_id: "",
       suggested_hs_code: item.hs_code || "",
       normalized_hs_code: sourceCode,
       matched_on: sourceCode ? ["source_document"] : [],
       source_count: 0,
-      confidence: sourceCode ? "high" : "low",
-      needs_confirmation: !sourceCode,
+      candidate_codes: sourceCandidate ? [sourceCandidate] : [],
+      source_hints: sourceCandidate ? [sourceCandidate] : [],
+      reference_conflict: false,
+      confidence: sourceCode ? "medium" : "low",
+      needs_confirmation: true,
     };
   }
   const { entry, matchedOn, aliasMatch, materialMatch } = matches[0];
   const confirmed = ["confirmed", "browser_confirmed"].includes(entry.status);
+  const confirmedMaster = entry.confirmation_source === "explicit_user_correction";
   const candidateCodes = uniqueHsCandidates([
     {
       hs_code: entry.hs_code,
-      source: entry.status === "browser_confirmed" ? "browser_confirmed" : "fedex_history_or_knowledge",
-      source_label: entry.status === "browser_confirmed" ? "本机已确认" : "FedEx 历史参考",
+      source: confirmedMaster ? "confirmed_product_knowledge" : entry.status === "browser_confirmed" ? "browser_confirmed" : "fedex_history_or_knowledge",
+      source_label: confirmedMaster ? "正式 HS Code 库" : entry.status === "browser_confirmed" ? "本机已确认" : "FedEx 历史参考",
       source_count: Number(entry.source_count || 0),
     },
+    ...(entry.source_hints || []).map((hint) => ({
+      hs_code: hint.hs_code,
+      source: "shipment_source_hint",
+      source_scope: "source_document",
+      source_label: hint.source_file || "来源文件提示",
+      source_count: 1,
+      evidence: hint,
+    })),
     ...(entry.reference_conflicts || []).map((conflict) => ({
       hs_code: conflict.hs_code,
       source: "local_hscode_summary",
@@ -546,20 +574,34 @@ function matchFedexHsKnowledge(item, destinationCountry = "") {
       source_count: 1,
       evidence: conflict,
     })),
-  ]);
-  const referenceConflict = !sourceCode && candidateCodes.length > 1;
+    sourceCode ? {
+      hs_code: item.hs_code,
+      source: "shipment_source_hint",
+      source_scope: "source_document",
+      source_label: "本次来源文件提示",
+      source_count: 1,
+    } : null,
+  ].filter(Boolean));
+  const referenceConflict = candidateCodes.length > 1;
+  const confirmedExact = confirmed && aliasMatch && materialMatch;
+  const libraryCode = String(entry.hs_code || "").trim();
+  const sourceHints = candidateCodes.filter((candidate) => (
+    ["shipment_source_hint", "local_hscode_summary"].includes(candidate.source)
+    && candidate.normalized_hs_code !== normalizeHsCode(libraryCode)
+  ));
   return {
-    status: sourceCode ? "source_explicit" : !referenceConflict && confirmed && aliasMatch && materialMatch ? "confirmed_exact" : "candidate",
+    status: confirmedExact ? "confirmed_exact" : "candidate",
     knowledge_id: entry.id,
-    suggested_hs_code: item.hs_code || entry.hs_code || "",
-    normalized_hs_code: sourceCode || normalizeHsCode(entry.hs_code),
+    suggested_hs_code: libraryCode,
+    normalized_hs_code: normalizeHsCode(libraryCode),
     matched_on: matchedOn,
     source_count: Number(entry.source_count || 0),
-    candidate_codes: referenceConflict ? candidateCodes : [],
+    candidate_codes: referenceConflict || !confirmedExact ? candidateCodes : [],
+    source_hints: sourceHints,
     reference_conflict: referenceConflict,
     knowledge_status: entry.status || "candidate",
-    confidence: sourceCode || (!referenceConflict && confirmed && aliasMatch && materialMatch) ? "high" : aliasMatch ? "medium" : "low",
-    needs_confirmation: sourceCode ? false : referenceConflict || !(confirmed && aliasMatch && materialMatch),
+    confidence: confirmedExact ? "high" : aliasMatch ? "medium" : "low",
+    needs_confirmation: !confirmedExact,
   };
 }
 
@@ -569,9 +611,9 @@ function applyFedexHsKnowledge(data) {
   (data.items || []).forEach((item) => {
     const existing = item.hs_code_reference || {};
     const reference = matchFedexHsKnowledge(item, destination);
-    if (existing.status && !["unresolved", "candidate"].includes(existing.status)) return;
+    if (["browser_confirmed", "manual_pending", "rejected"].includes(existing.status)) return;
     const existingCandidates = uniqueHsCandidates(existing.candidate_codes || []);
-    if (existingCandidates.length) {
+    if (existingCandidates.length && reference.status !== "confirmed_exact") {
       const matchedCandidates = uniqueHsCandidates([
         ...(reference.candidate_codes || []),
         reference.suggested_hs_code ? {
@@ -590,19 +632,21 @@ function applyFedexHsKnowledge(data) {
         suggested_hs_code: existing.suggested_hs_code || combined[0]?.hs_code || "",
         needs_confirmation: true,
       };
-      if (combined.length > 1 && !["source_explicit", "browser_confirmed"].includes(existing.status)) item.hs_code = "";
+      item.hs_code = "";
       return;
     }
     if (existing.status === "candidate" && reference.knowledge_status !== "browser_confirmed") return;
     item.hs_code_reference = reference;
-    if (!item.hs_code && reference.status === "confirmed_exact") item.hs_code = reference.suggested_hs_code;
+    if (reference.status === "confirmed_exact") item.hs_code = reference.suggested_hs_code;
+    else if (reference.status === "source_hint") item.hs_code = "";
   });
 }
 
 function knowledgeStatusText() {
   const count = state.localHsKnowledge.length;
+  const formalCount = (state.knowledge.products?.length || 0) + (state.knowledge.fedex_products?.length || 0);
   const status = qs("knowledgeStatus");
-  if (status) status.textContent = `本机已确认 ${count} 条；正式参考 ${state.knowledge.fedex_products?.length || 0} 条`;
+  if (status) status.textContent = `本机已确认 ${count} 条；正式参考 ${formalCount} 条`;
 }
 
 async function refreshLocalHsKnowledge() {
@@ -2213,7 +2257,7 @@ function bindTableInputs(tableName) {
       const item = state.current.items[row];
       const importedCandidates = uniqueHsCandidates(item.hs_code_reference?.candidate_codes || []);
       if (
-        !["browser_confirmed", "source_explicit"].includes(item.hs_code_reference?.status)
+        item.hs_code_reference?.status !== "browser_confirmed"
         && !importedCandidates.length
       ) {
         item.hs_code_reference = matchFedexHsKnowledge(item, getField("destination_country"));
@@ -2239,7 +2283,7 @@ function priceCell(item, index) {
 function hsReferenceCell(item, index) {
   const reference = item.hs_code_reference || { status: "unresolved", needs_confirmation: true };
   const labels = {
-    source_explicit: "来源文件",
+    source_hint: "来源提示",
     confirmed_exact: "正式参考",
     candidate: "候选",
     manual_pending: "待确认",
@@ -2249,6 +2293,7 @@ function hsReferenceCell(item, index) {
   };
   const status = reference.status || "unresolved";
   const candidates = uniqueHsCandidates(reference.candidate_codes || []);
+  const sourceHints = uniqueHsCandidates(reference.source_hints || []);
   const hasConflict = candidates.length > 1 && reference.needs_confirmation !== false;
   const conflictPending = hasConflict && status !== "browser_confirmed";
   const suggested = reference.suggested_hs_code || candidates[0]?.hs_code || item.hs_code || "";
@@ -2259,12 +2304,13 @@ function hsReferenceCell(item, index) {
     ? candidates[0].source_label || candidates[0].source || "候选参考"
     : reference.knowledge_id
     ? `${reference.knowledge_id}${reference.source_count ? ` · ${reference.source_count} 次来源` : ""}`
-    : status === "source_explicit" ? "本次来源文件" : "暂无可靠参考";
-  const canConfirm = !conflictPending && Boolean(normalizeHsCode(item.hs_code || suggested)) && !["source_explicit", "confirmed_exact", "browser_confirmed"].includes(status);
+    : status === "source_hint" ? "本次来源文件仅作提示" : "暂无可靠参考";
+  const canConfirm = !conflictPending && Boolean(normalizeHsCode(item.hs_code || suggested)) && !["confirmed_exact", "browser_confirmed"].includes(status);
   return `
     <div class="hs-reference">
       <div class="hs-reference-title"><span class="tag ${tone}">${conflictPending ? "编码冲突" : labels[status] || status}</span>${!conflictPending && suggested ? `<strong>${escapeHtml(suggested)}</strong>` : ""}</div>
       <small>${escapeHtml(sourceText)}</small>
+      ${status === "confirmed_exact" && sourceHints.length ? `<small class="hs-source-hint">来源文件提示 ${escapeHtml(sourceHints.map((hint) => hint.hs_code).join("、"))}，已按正式库编码覆盖。</small>` : ""}
       ${conflictPending ? `
         <div class="hs-conflict-options" role="group" aria-label="选择第 ${index + 1} 行商品 HS Code">
           ${candidates.map((candidate, candidateIndex) => `
@@ -2338,7 +2384,7 @@ async function selectItemFieldRecommendation(rowIndex, key, value) {
   const importedCandidates = uniqueHsCandidates(reference.candidate_codes || []);
   if (
     state.current.case?.shipment_type === "fedex"
-    && !["browser_confirmed", "source_explicit"].includes(reference.status)
+    && reference.status !== "browser_confirmed"
     && !importedCandidates.length
   ) {
     item.hs_code_reference = matchFedexHsKnowledge(item, getField("destination_country"));
@@ -3366,6 +3412,12 @@ async function loadKnowledge() {
     knowledge = await api("/api/knowledge");
   } catch {
     knowledge = cloneJson(fallbackKnowledge);
+  }
+  try {
+    const response = await fetch("./data/product-hs-knowledge.json");
+    if (response.ok) knowledge.products = (await response.json()).entries || [];
+  } catch {
+    knowledge.products = knowledge.products || [];
   }
   try {
     const response = await fetch("./data/fedex-product-hs-knowledge.json");

@@ -1,0 +1,63 @@
+{
+  "schema_version": 1,
+  "updated_at": "2026-08-25",
+  "description": "User-confirmed product and HS-code master data for every trade-document workflow. Confirmed exact product matches outrank codes printed in bills of lading, invoices, packing lists, contracts, and other shipment sources. Source-document codes remain non-authoritative hints.",
+  "entries": [
+    {
+      "id": "glass-curtain-wall",
+      "description_en": "GLASS CURTAIN WALL",
+      "description_cn": "玻璃幕墙",
+      "aliases_en": ["GLASS CURTAIN WALLS"],
+      "aliases_cn": ["玻璃幕墙", "幕墙玻璃"],
+      "material_en": "Glass",
+      "material_cn": "玻璃",
+      "use_en": "Curtain wall",
+      "use_cn": "建筑幕墙",
+      "default_unit": "SQM",
+      "hs_code": "700530000000",
+      "hs_code_raw": ["700530000000"],
+      "destination_countries": ["KUWAIT"],
+      "status": "confirmed",
+      "confirmation_source": "explicit_user_correction",
+      "confirmed_at": "2026-08-25",
+      "source_count": 1,
+      "source_files": ["user-confirmed-correction-2026-08-25"],
+      "last_seen": "2026-08-25",
+      "required_keywords": ["GLASS", "CURTAIN", "WALL"],
+      "material_keywords": ["GLASS", "玻璃"],
+      "source_hints": [
+        {
+          "hs_code": "7007190000",
+          "normalized_hs_code": "7007190000",
+          "source_file": "N3216.pdf",
+          "source_type": "bill_of_lading",
+          "status": "source_hint_only",
+          "note": "The B/L rider prints this code, but it must not override the confirmed internal master code."
+        }
+      ]
+    },
+    {
+      "id": "marble-slabs",
+      "description_en": "MARBLE SLABS",
+      "description_cn": "大理石板",
+      "aliases_en": ["MARBLE SLAB"],
+      "aliases_cn": ["大理石板", "大理石板材"],
+      "material_en": "Marble",
+      "material_cn": "大理石",
+      "use_en": "Construction and surface decoration",
+      "use_cn": "建筑及表面装饰",
+      "default_unit": "SQM",
+      "hs_code": "68101923000",
+      "hs_code_raw": ["68101923000"],
+      "destination_countries": ["KUWAIT"],
+      "status": "confirmed",
+      "confirmation_source": "explicit_user_correction",
+      "confirmed_at": "2026-08-25",
+      "source_count": 1,
+      "source_files": ["user-confirmed-correction-2026-08-25"],
+      "last_seen": "2026-08-25",
+      "required_keywords": ["MARBLE", "SLAB"],
+      "material_keywords": ["MARBLE", "大理石"]
+    }
+  ]
+}
