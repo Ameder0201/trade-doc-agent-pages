@@ -635,11 +635,19 @@ p {
 
 body.workflow-fedex [data-sea-only],
 body.workflow-co [data-sea-only],
+body.workflow-bk [data-sea-only],
 body.workflow-pipkg [data-fedex-only],
 body.workflow-co [data-fedex-only],
+body.workflow-bk [data-fedex-only],
 body.workflow-pipkg [data-co-only],
 body.workflow-fedex [data-co-only],
-body.workflow-co [data-commercial-only] {
+body.workflow-bk [data-co-only],
+body.workflow-co [data-commercial-only],
+body.workflow-bk [data-commercial-only],
+body.workflow-bk [data-bk-hidden],
+body.workflow-pipkg [data-bk-only],
+body.workflow-fedex [data-bk-only],
+body.workflow-co [data-bk-only] {
   display: none;
 }
 
@@ -963,6 +971,10 @@ body.workflow-fedex #itemsTable {
 
 body.workflow-co #itemsTable {
   min-width: 980px;
+}
+
+body.workflow-bk #itemsTable {
+  min-width: 720px;
 }
 
 .hs-reference-cell {

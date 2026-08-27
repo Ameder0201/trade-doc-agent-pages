@@ -95,6 +95,18 @@ const fieldLabels = {
   co_manufacturer_block: "生产商",
   co_certification_place_date: "签证地点及日期",
   co_declaration_place_date: "出口商声明地点及日期",
+  booking_no: "订舱号",
+  shipper_phone: "发货人电话",
+  shipper_fax: "发货人传真",
+  shipper_contact: "发货人联系人",
+  notify_party: "通知人",
+  pre_carriage: "头程运输",
+  place_of_receipt: "收货地点",
+  place_of_delivery: "交货地",
+  service_term: "运输条款",
+  freight_term: "运费条款",
+  marks: "唛头",
+  cbm: "总体积 (CBM)",
 };
 
 const seaFields = [
@@ -138,9 +150,33 @@ const coFields = [
   "co_declaration_place_date",
 ];
 
+const bkFields = [
+  "booking_no",
+  "shipper_block",
+  "shipper_phone",
+  "shipper_fax",
+  "shipper_contact",
+  "consignee_company",
+  "notify_party",
+  "pre_carriage",
+  "place_of_receipt",
+  "vessel_voyage",
+  "loading_port",
+  "destination_port",
+  "place_of_delivery",
+  "service_term",
+  "container_qty",
+  "freight_term",
+  "marks",
+  "gross_weight",
+  "cbm",
+];
+
 const fieldChoices = {
   trade_term: ["FOB", "EXW", "CIF SHUWAIKH", "CIF", "CFR SHUWAIKH", "CFR", "DAP", "DDP"],
   payment_term: ["T/T", "T/T USD", "L/C", "30% T/T DEPOSIT, 70% BEFORE LOADING"],
+  service_term: ["CY/CY", "CY/DR", "CFS/CFS", "CFS/CY", "DR/CY", "DR/DR"],
+  freight_term: ["FREIGHT PREPAID", "FREIGHT COLLECT"],
 };
 
 const invoiceNumberPattern = /^(FT|KL)(01|02)\d{6}\d{2}$/;
@@ -349,6 +385,8 @@ function renderDraftHistory() {
         ? "FedEx 单票"
         : record.shipmentType === "co"
         ? "CO 产地证"
+        : record.shipmentType === "bk"
+        ? "BK 订舱"
         : record.shipmentType === "air"
         ? "空运 PIPKG"
         : `提单组 ${record.groupCount || 1}`,
@@ -985,7 +1023,7 @@ function validateInBrowser(data) {
   applyDefaultNetWeights(data);
   const shipmentType = data.case?.shipment_type;
   let reconciliation = {};
-  if (shipmentType === "co" || data.document_type === "certificate_of_origin") {
+  if (["co", "bk"].includes(shipmentType) || ["certificate_of_origin", "booking_order"].includes(data.document_type)) {
     delete data.packing_reconciliation;
   } else {
     reconciliation = reconcilePackingTotals(data, true);
@@ -1016,11 +1054,30 @@ function validateInBrowser(data) {
       "co_manufacturer_block",
     );
   }
+  if (shipmentType === "bk" || data.document_type === "booking_order") {
+    required.splice(0, required.length,
+      "shipper_block",
+      "consignee_company",
+      "loading_port",
+      "destination_port",
+      "gross_weight",
+      "cbm",
+    );
+  }
   required.forEach((name) => {
     if (!fields[name]?.value) add("error", "missing_required", `缺少必填字段：${name}`, name);
   });
   if (!(data.items || []).length) add("error", "missing_items", "缺少商品明细，需要人工录入或补充资料", "items");
   (data.items || []).forEach((item, index) => {
+    if (shipmentType === "bk") {
+      if (!String(item.description_en || item.description_cn || "").trim()) {
+        add("error", "missing_bk_description", `第 ${index + 1} 行缺少货物名称`, `items[${index}].description_en`);
+      }
+      if (!(Number(item.gross_weight) > 0)) {
+        add("error", "missing_bk_item_weight", `第 ${index + 1} 行缺少有效货物毛重`, `items[${index}].gross_weight`);
+      }
+      return;
+    }
     const quantity = Number(item.quantity || 0);
     const unitPrice = Number(item.unit_price || 0);
     const amount = Number(item.amount || 0);
@@ -1059,6 +1116,18 @@ function validateInBrowser(data) {
       }
     }
   });
+  if (shipmentType === "bk") {
+    const declaredGross = Number(valueFromDraftField(fields.gross_weight) || 0);
+    const itemGross = (data.items || []).reduce((sum, item) => sum + Number(item.gross_weight || 0), 0);
+    if (declaredGross > 0 && itemGross > 0 && Math.abs(declaredGross - itemGross) > 1) {
+      add("warning", "bk_weight_mismatch", `货物分类毛重合计 ${itemGross} KGS，与总毛重 ${declaredGross} KGS 不一致`, "fields.gross_weight");
+    }
+    ["booking_no", "vessel_voyage", "container_qty"].forEach((name) => {
+      if (!String(valueFromDraftField(fields[name]) || "").trim()) {
+        add("warning", "missing_bk_operational_field", `BK 尚未填写：${fieldLabels[name] || name}`, name);
+      }
+    });
+  }
   if (shipmentType === "fedex" && (data.items || []).some((item) => item.unit_price_method === "ai_estimate")) {
     const total = (data.items || []).reduce((sum, item) => sum + Number(item.quantity || 0) * Number(item.unit_price || 0), 0);
     const cap = Number(data.fedex_pricing?.estimated_total_cap_usd || 80);
@@ -1559,6 +1628,76 @@ async function exportCoInBrowser(data) {
   return anchor.download;
 }
 
+function bkWeightDisplay(value) {
+  const number = Number(value || 0);
+  if (!Number.isFinite(number)) return "";
+  return number.toLocaleString("en-US", { useGrouping: false, maximumFractionDigits: 3 });
+}
+
+function bkCargoBlock(data) {
+  return (data.items || [])
+    .map((item) => {
+      const description = String(item.description_en || item.description_cn || "").trim();
+      const weight = Number(item.gross_weight || 0);
+      return weight > 0 ? `${description} - ${bkWeightDisplay(weight)} KGS` : description;
+    })
+    .filter(Boolean)
+    .join("\n");
+}
+
+async function exportBkInBrowser(data) {
+  if (!window.ExcelJS) throw new Error("Excel 导出组件未加载");
+  const response = await fetch("./templates/NanshaBookingOrderTemplate.xlsx?v=20260827-bk");
+  if (!response.ok) throw new Error("无法读取 BK 模板");
+  const workbook = new window.ExcelJS.Workbook();
+  await workbook.xlsx.load(await response.arrayBuffer());
+  const sheet = workbook.getWorksheet("Sheet1") || workbook.worksheets[0];
+  const itemWeight = (data.items || []).reduce((sum, item) => sum + Number(item.gross_weight || 0), 0);
+  const grossWeight = Number(fieldValue(data, "gross_weight", data.totals?.gross_weight || itemWeight));
+  const cbm = Number(fieldValue(data, "cbm", data.totals?.cbm || 0));
+  const freightTerm = String(fieldValue(data, "freight_term", "FREIGHT PREPAID") || "").toUpperCase();
+  const caseNo = String(data.case?.case_no || data.case_no || fieldValue(data, "booking_no", "BK")).trim() || "BK";
+  const values = {
+    P2: "",
+    V4: "",
+    W3: fieldValue(data, "booking_no", ""),
+    A3: fieldValue(data, "shipper_block", ""),
+    B8: fieldValue(data, "shipper_phone", ""),
+    F8: fieldValue(data, "shipper_fax", ""),
+    K8: fieldValue(data, "shipper_contact", ""),
+    A10: fieldValue(data, "consignee_company", ""),
+    A16: "",
+    A17: fieldValue(data, "notify_party", "SAME AS CONSIGNEE"),
+    A21: fieldValue(data, "pre_carriage", ""),
+    H21: fieldValue(data, "place_of_receipt", ""),
+    A24: fieldValue(data, "vessel_voyage", ""),
+    H24: fieldValue(data, "loading_port", "NANSHA"),
+    P18: fieldValue(data, "service_term", "CY/CY"),
+    AA21: fieldValue(data, "container_qty", ""),
+    P24: freightTerm === "FREIGHT PREPAID" ? "√" : "",
+    W24: freightTerm === "FREIGHT COLLECT" ? "√" : "",
+    A27: fieldValue(data, "destination_port", "SHUWAIKH"),
+    H27: fieldValue(data, "place_of_delivery", ""),
+    I27: "",
+    A31: fieldValue(data, "marks", "N/A"),
+    H31: bkCargoBlock(data),
+    U31: grossWeight > 0 ? `${bkWeightDisplay(grossWeight)} KGS` : "",
+    Y31: cbm > 0 ? `${bkWeightDisplay(cbm)} CBM` : "",
+  };
+  Object.entries(values).forEach(([cell, value]) => setWorkbookCell(sheet, cell, value));
+  const blob = new Blob(
+    [await workbook.xlsx.writeBuffer()],
+    { type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" },
+  );
+  const downloadUrl = URL.createObjectURL(blob);
+  const anchor = document.createElement("a");
+  anchor.href = downloadUrl;
+  anchor.download = `${caseNo} BK.xlsx`;
+  anchor.click();
+  window.setTimeout(() => URL.revokeObjectURL(downloadUrl), 1000);
+  return anchor.download;
+}
+
 function setStatus(text) {
   qs("serverStatus").textContent = text;
 }
@@ -1601,7 +1740,8 @@ function shipmentCode() {
 
 function inferDraftShipmentType(draft) {
   const explicit = String(firstDefined(draft.shipment_type, draft.case?.shipment_type, "")).toLowerCase();
-  if (["fedex", "sea", "air", "co"].includes(explicit)) return explicit;
+  if (["fedex", "sea", "air", "co", "bk"].includes(explicit)) return explicit;
+  if (String(draft.document_type || "").toLowerCase() === "booking_order") return "bk";
   if (String(draft.document_type || "").toLowerCase() === "certificate_of_origin") return "co";
   if (String(draft.document_type || "").toLowerCase() === "fedex_commercial_invoice") return "fedex";
   const invoiceNo = String(firstDefined(
@@ -1614,6 +1754,7 @@ function inferDraftShipmentType(draft) {
   if (/^(FT|KL)01\d{8}$/.test(invoiceNo)) return "sea";
   const transport = String(firstDefined(valueFromDraftField(draft.fields?.transport), valueFromDraftField(draft.shipment_groups?.[0]?.transport), ""));
   if (/FEDEX|EXPRESS|COURIER/i.test(transport)) return "fedex";
+  if ((draft.file_inventory || draft.files || []).some((file) => /booking_order/i.test(String(file.category || file.classification?.category || "")))) return "bk";
   if ((draft.file_inventory || draft.files || []).some((file) => /fedex_source|fedex_invoice_source/i.test(String(file.category || file.classification?.category || "")))) return "fedex";
   return "sea";
 }
@@ -1623,33 +1764,36 @@ function workflowType(data = state.current) {
   const shipmentType = String(data?.case?.shipment_type || data?.shipment_type || "").toLowerCase();
   if (documentType === "certificate_of_origin" || shipmentType === "co") return "co";
   if (documentType === "fedex_commercial_invoice" || shipmentType === "fedex") return "fedex";
+  if (documentType === "booking_order" || shipmentType === "bk") return "bk";
   return "pipkg";
 }
 
 function renderShipmentMode() {
   const type = workflowType();
-  ["pipkg", "fedex", "co"].forEach((name) => document.body.classList.toggle(`workflow-${name}`, type === name));
+  ["pipkg", "fedex", "co", "bk"].forEach((name) => document.body.classList.toggle(`workflow-${name}`, type === name));
   document.querySelectorAll("[data-workflow-type]").forEach((button) => {
     button.classList.toggle("active", button.dataset.workflowType === type);
   });
   qs("reconciliationPanel").hidden = type !== "pipkg";
-  qs("itemsTabLabel").textContent = type === "fedex" ? "FedEx PI" : type === "co" ? "CO 商品" : "PI";
+  qs("itemsTabLabel").textContent = type === "fedex" ? "FedEx PI" : type === "co" ? "CO 商品" : type === "bk" ? "BK 货物" : "PI";
   qs("quantityHeader").textContent = type === "co" ? "CO 数量" : "Quantity / m";
-  qs("exportButton").textContent = type === "fedex" ? "导出 FedEx PI" : type === "co" ? "导出 CO" : "导出";
+  qs("exportButton").textContent = type === "fedex" ? "导出 FedEx PI" : type === "co" ? "导出 CO" : type === "bk" ? "导出 BK" : "导出";
   qs("exportMenu").querySelectorAll("[data-export-kind]").forEach((button) => {
     button.hidden = type === "fedex"
       ? button.dataset.exportKind !== "fedex"
       : type === "co"
       ? button.dataset.exportKind !== "co"
-      : ["fedex", "co"].includes(button.dataset.exportKind);
+      : type === "bk"
+      ? button.dataset.exportKind !== "bk"
+      : ["fedex", "co", "bk"].includes(button.dataset.exportKind);
   });
   const activeTab = document.querySelector(".tab.active");
   if (type !== "pipkg" && activeTab?.hasAttribute("data-sea-only")) openTab("fields");
 }
 
 function setWorkflowType(type) {
-  if (!state.current || !["pipkg", "fedex", "co"].includes(type) || workflowType() === type) return;
-  if (["fedex", "co"].includes(type) && (state.current.shipment_groups || []).length > 1) {
+  if (!state.current || !["pipkg", "fedex", "co", "bk"].includes(type) || workflowType() === type) return;
+  if (["fedex", "co", "bk"].includes(type) && (state.current.shipment_groups || []).length > 1) {
     window.alert("当前整理稿包含多个提单组，不能直接合并为一份单票文件。请先选择一组或导入独立整理稿。");
     return;
   }
@@ -1663,13 +1807,16 @@ function setWorkflowType(type) {
     ? "fedex_commercial_invoice"
     : type === "co"
     ? "certificate_of_origin"
+    : type === "bk"
+    ? "booking_order"
     : shipmentType === "air" ? "air_pipkg" : "sea_pipkg";
   state.current.fedex_invoice_output_count = type === "fedex" ? 1 : 0;
   state.current.co_output_count = type === "co" ? 1 : 0;
+  state.current.bk_output_count = type === "bk" ? 1 : 0;
   state.current.pipkg_output_count = type === "pipkg" ? Math.max(1, state.current.shipment_groups?.length || 1) : 0;
   state.current.si_output_count = type === "pipkg" && shipmentType === "sea" ? Math.max(1, state.current.shipment_groups?.length || 1) : 0;
   state.current.split_required = shipmentType === "sea" && (state.current.shipment_groups || []).length > 1;
-  if (["fedex", "co"].includes(type)) {
+  if (["fedex", "co", "bk"].includes(type)) {
     state.current.shipment_groups = [];
     state.activeGroupIndex = -1;
     state.current.active_group_id = "";
@@ -1679,12 +1826,14 @@ function setWorkflowType(type) {
     ensureFedexDefaultFields();
   } else if (type === "co") {
     ensureCoDefaultFields();
+  } else if (type === "bk") {
+    ensureBkDefaultFields();
   } else if (!getField("transport")) {
     setField("transport", "BY SEA");
   }
   const currentNumber = String(getField("invoice_no") || "").toUpperCase();
   const match = currentNumber.match(/^(FT|KL)(01|02)(\d{6})(\d{2})$/);
-  if (match && type !== "co") {
+  if (match && !["co", "bk"].includes(type)) {
     const nextNumber = `${match[1]}${type === "fedex" ? "02" : "01"}${match[3]}${match[4]}`;
     setField("invoice_no", nextNumber);
     state.current.case.case_no = nextNumber;
@@ -1733,6 +1882,10 @@ function nextDailyInvoiceNumber() {
 function ensureDefaultInvoiceFields() {
   if (!state.current) return;
   if (!state.current.fields) state.current.fields = {};
+  if (workflowType() === "bk") {
+    ensureBkDefaultFields();
+    return;
+  }
   const existing = String(getField("invoice_no") || "").trim().toUpperCase();
   if (!existing) {
     const generated = nextDailyInvoiceNumber();
@@ -1758,6 +1911,27 @@ function ensureDefaultInvoiceFields() {
   }
   if (state.current.case?.shipment_type === "fedex") ensureFedexDefaultFields();
   if (workflowType() === "co") ensureCoDefaultFields();
+}
+
+function ensureBkDefaultFields() {
+  if (!state.current) return;
+  if (!state.current.fields) state.current.fields = {};
+  const defaults = {
+    notify_party: "SAME AS CONSIGNEE",
+    loading_port: "NANSHA",
+    destination_port: "SHUWAIKH",
+    service_term: "CY/CY",
+    freight_term: "FREIGHT PREPAID",
+    marks: "N/A",
+  };
+  Object.entries(defaults).forEach(([name, value]) => {
+    if (getField(name)) return;
+    state.current.fields[name] = {
+      value,
+      confidence: "medium",
+      evidence: [{ file: "NANSHA BK.xlsx", locator: name, text: "BK 模板默认值，可在导出前修改" }],
+    };
+  });
 }
 
 function ensureFedexDefaultFields() {
@@ -1928,6 +2102,7 @@ function renderFiles() {
 
 function displayCategory(file) {
   if (file.bill_of_lading_candidates?.length || file.classification.category === "bill_of_lading") return "提单";
+  if (file.classification.category === "booking_order") return "BK";
   if (file.classification.category === "certificate_of_origin") return "CO";
   if (["fedex_invoice_source", "fedex_source"].includes(file.classification.category)) return "FedEx";
   if (file.classification.category === "packing") return "装箱单";
@@ -1959,16 +2134,18 @@ function renderSummary() {
     ? Number(fieldValue(data, "total_packages", data.totals?.packages || 0))
     : (data.packing_lines || []).reduce((sum, item) => sum + Number(item.packages || 0), 0);
   const groupCount = (data.shipment_groups || []).length || 1;
-  const typeLabel = mode === "fedex" ? "FedEx" : mode === "co" ? "CO" : data.case.shipment_type === "air" ? "空运 PIPKG" : "海运 PIPKG";
-  const outputLabel = mode === "fedex" ? "Commercial Invoice" : mode === "co" ? "Certificate of Origin" : `${groupCount} 组`;
+  const totalGross = Number(fieldValue(data, "gross_weight", data.totals?.gross_weight || (data.items || []).reduce((sum, item) => sum + Number(item.gross_weight || 0), 0)));
+  const totalCbm = Number(fieldValue(data, "cbm", data.totals?.cbm || 0));
+  const typeLabel = mode === "fedex" ? "FedEx" : mode === "co" ? "CO" : mode === "bk" ? "BK" : data.case.shipment_type === "air" ? "空运 PIPKG" : "海运 PIPKG";
+  const outputLabel = mode === "fedex" ? "Commercial Invoice" : mode === "co" ? "Certificate of Origin" : mode === "bk" ? "Booking Order" : `${groupCount} 组`;
   const cards = [
     ["单号", data.case.case_no],
     ["类型", typeLabel],
     ["文件", `${data.files?.length || 0} 个`],
     [mode === "pipkg" ? "提单组" : "输出", outputLabel],
-    [mode === "co" ? "毛重" : "金额", mode === "co" ? `${data.totals?.gross_weight || "待补"} KGS` : `USD ${money(totalAmount)}`],
+    [["co", "bk"].includes(mode) ? "毛重" : "金额", ["co", "bk"].includes(mode) ? `${totalGross || "待补"} KGS` : `USD ${money(totalAmount)}`],
     ["商品", `${data.items.length} 行`],
-    [mode === "pipkg" ? "箱数" : "包裹", totalPackages || "待补"],
+    [mode === "pipkg" ? "箱数" : mode === "bk" ? "体积" : "包裹", mode === "bk" ? `${totalCbm || "待补"} CBM` : totalPackages || "待补"],
     ["问题", `${data.issues.length} 个`],
     ["状态", data.issues.some((i) => i.level === "error") ? "待处理" : "可导出"],
   ];
@@ -1989,11 +2166,11 @@ function renderFields() {
     return;
   }
   const mode = workflowType();
-  const visibleFields = mode === "fedex" ? fedexFields : mode === "co" ? coFields : seaFields;
+  const visibleFields = mode === "fedex" ? fedexFields : mode === "co" ? coFields : mode === "bk" ? bkFields : seaFields;
   grid.innerHTML = visibleFields
     .map((name) => {
       const field = state.current.fields[name] || { value: "", confidence: "low", evidence: [] };
-      const multiline = ["shipper_block", "consignee_company", "co_exporter_block", "co_manufacturer_block", "co_certification_place_date", "co_declaration_place_date"].includes(name);
+      const multiline = ["shipper_block", "consignee_company", "notify_party", "co_exporter_block", "co_manufacturer_block", "co_certification_place_date", "co_declaration_place_date"].includes(name);
       let input = multiline
         ? `<textarea data-field="${name}">${field.value || ""}</textarea>`
         : `<input data-field="${name}" value="${field.value || ""}" />`;
@@ -2409,13 +2586,14 @@ function renderItems() {
         <td>${editableCell(item.description_cn, "description_cn", index, "items")}</td>
         <td data-co-only>${editableCell(item.spec, "spec", index, "items")}</td>
         <td data-commercial-only>${priceCell(item, index)}</td>
-        <td>${editableCell(item.quantity, "quantity", index, "items")}</td>
-        <td>${editableCell(item.unit, "unit", index, "items")}</td>
+        <td data-bk-hidden>${editableCell(item.quantity, "quantity", index, "items")}</td>
+        <td data-bk-hidden>${editableCell(item.unit, "unit", index, "items")}</td>
         <td data-commercial-only>${editableCell(item.amount, "amount", index, "items")}</td>
-        <td>${editableCell(item.hs_code, "hs_code", index, "items")}</td>
+        <td data-bk-hidden>${editableCell(item.hs_code, "hs_code", index, "items")}</td>
         <td data-fedex-only>${itemRecommendationCell(item, "material", index)}</td>
         <td data-fedex-only>${itemRecommendationCell(item, "use", index)}</td>
-        <td>${escapeHtml(item.source || "manual")}</td>
+        <td data-bk-only>${editableCell(item.gross_weight, "gross_weight", index, "items")}</td>
+        <td data-bk-hidden>${escapeHtml(item.source || "manual")}</td>
         <td data-fedex-only class="hs-reference-cell">${hsReferenceCell(item, index)}</td>
         <td class="row-action-cell">
           <button type="button" class="row-delete-button" data-delete-table="items" data-delete-row="${index}" title="删除此商品行" aria-label="删除第 ${index + 1} 个商品行">×</button>
@@ -2460,7 +2638,7 @@ function renderPriceSummary() {
   const table = qs("itemsTable");
   const existing = document.querySelector(".price-summary");
   if (existing) existing.remove();
-  if (workflowType() === "co") return;
+  if (["co", "bk"].includes(workflowType())) return;
   const total = (state.current?.items || []).reduce((sum, item) => sum + Number(item.amount || 0), 0);
   const div = document.createElement("div");
   div.className = "price-summary";
@@ -2873,6 +3051,8 @@ function mapDraftItem(item) {
     description_cn: item.description_cn || "",
     spec: item.spec || "",
     hs_code: item.hs_code || "",
+    gross_weight: draftNumberOrBlank(item.gross_weight_calculated, item.gross_weight_source, item.gross_weight),
+    weight_unit: item.weight_unit || "KGS",
     quantity: quantity.quantity,
     unit: quantity.unit,
     unit_price: quantity.unitPrice,
@@ -2965,6 +3145,9 @@ function mergeCurrentItems(originalRows, currentRows) {
       description_cn: row.description_cn,
       spec: row.spec || merged.spec || "",
       hs_code: row.hs_code,
+      gross_weight: row.gross_weight,
+      gross_weight_calculated: row.gross_weight,
+      weight_unit: row.weight_unit || merged.weight_unit || "KGS",
       quantity: row.quantity,
       pipkg_quantity: row.quantity,
       unit: row.unit,
@@ -3108,9 +3291,12 @@ function buildEditableDraftPayload() {
     ? "fedex_commercial_invoice"
     : mode === "co"
     ? "certificate_of_origin"
+    : mode === "bk"
+    ? "booking_order"
     : payload.document_type || (shipmentType === "air" ? "air_pipkg" : "sea_pipkg");
   payload.fedex_invoice_output_count = mode === "fedex" ? 1 : 0;
   payload.co_output_count = mode === "co" ? 1 : 0;
+  payload.bk_output_count = mode === "bk" ? 1 : 0;
   payload.pipkg_output_count = mode === "pipkg" ? state.current?.pipkg_output_count ?? 1 : 0;
   payload.si_output_count = mode === "pipkg" ? state.current?.si_output_count ?? 0 : 0;
   payload.split_required = shipmentType === "sea" && Boolean(state.current?.split_required);
@@ -3126,12 +3312,15 @@ function buildEditableDraftPayload() {
     payload.items = mergeCurrentItems(payload.items || [], state.current?.items || []);
     payload.packing_lines = mergeCurrentPackingLines(payload.packing_lines || [], state.current?.packing_lines || []);
     payload.issues = cloneJson(state.current?.issues || []);
-    payload.totals = ["fedex", "co"].includes(mode)
+    payload.totals = ["fedex", "co", "bk"].includes(mode)
       ? {
         quantity: (state.current?.items || []).reduce((sum, item) => sum + Number(item.quantity || 0), 0),
         packages: Number(getField("total_packages") || 0),
         amount: Number((state.current?.items || []).reduce((sum, item) => sum + Number(item.amount || 0), 0).toFixed(2)),
-        gross_weight: state.current?.totals?.gross_weight ?? null,
+        gross_weight: mode === "bk"
+          ? Number(getField("gross_weight") || (state.current?.items || []).reduce((sum, item) => sum + Number(item.gross_weight || 0), 0))
+          : state.current?.totals?.gross_weight ?? null,
+        cbm: mode === "bk" ? Number(getField("cbm") || 0) : state.current?.totals?.cbm ?? null,
       }
       : cloneJson(state.current?.bl_totals || {});
   }
@@ -3241,6 +3430,8 @@ function applyDraft(payload) {
       ? "fedex_commercial_invoice"
       : shipmentType === "co"
       ? "certificate_of_origin"
+      : shipmentType === "bk"
+      ? "booking_order"
       : draft.document_type || (shipmentType === "air" ? "air_pipkg" : "sea_pipkg"),
     files: sourceFiles.map((file) => ({
       ...file,
@@ -3257,7 +3448,8 @@ function applyDraft(payload) {
     split_required: shipmentType === "sea" && Boolean(draft.split_required),
     fedex_invoice_output_count: shipmentType === "fedex" ? 1 : 0,
     co_output_count: shipmentType === "co" ? 1 : 0,
-    pipkg_output_count: ["fedex", "co"].includes(shipmentType) ? 0 : draft.pipkg_output_count ?? Math.max(1, draft.shipment_groups?.length || 1),
+    bk_output_count: shipmentType === "bk" ? 1 : 0,
+    pipkg_output_count: ["fedex", "co", "bk"].includes(shipmentType) ? 0 : draft.pipkg_output_count ?? Math.max(1, draft.shipment_groups?.length || 1),
     si_output_count: shipmentType === "sea" ? draft.si_output_count ?? Math.max(1, draft.shipment_groups?.length || 1) : 0,
     skill_trace: cloneJson(draft.skill_trace || []),
     knowledge_candidates: cloneJson(draft.knowledge_candidates || []),
@@ -3304,7 +3496,7 @@ function applyDraft(payload) {
     state.current.active_group_id = "";
     if (shipmentType === "fedex") applyFedexHsKnowledge(state.current);
     recalculateCurrent();
-    if (["fedex", "co"].includes(shipmentType)) state.current = validateInBrowser(state.current);
+    if (["fedex", "co", "bk"].includes(shipmentType)) state.current = validateInBrowser(state.current);
     renderAll();
     if (shipmentType === "sea" && draft.shipment_groups?.length > 1) openTab("groups");
     if (shipmentType === "fedex") openTab("fields");
@@ -3628,6 +3820,8 @@ async function exportByKind(kind) {
         ? await exportFedexInBrowser(state.current)
         : mode === "co"
         ? await exportCoInBrowser(state.current)
+        : mode === "bk"
+        ? await exportBkInBrowser(state.current)
         : await exportPipkgInBrowser(state.current);
       qs("exportBox").innerHTML = `<strong>${filename}</strong><span>文件已在本机浏览器内生成并下载，整理稿数据未上传到服务器。</span>`;
       setStatus("已导出");
@@ -3652,6 +3846,8 @@ async function exportByKind(kind) {
         ? await exportFedexInBrowser(state.current)
         : mode === "co"
         ? await exportCoInBrowser(state.current)
+        : mode === "bk"
+        ? await exportBkInBrowser(state.current)
         : await exportPipkgInBrowser(state.current);
       qs("exportBox").innerHTML = `<strong>${filename}</strong><span>文件已由浏览器生成并下载。</span>`;
     } catch (error) {
@@ -3666,7 +3862,7 @@ async function exportByKind(kind) {
 function toggleExportMenu(event) {
   event.stopPropagation();
   const mode = workflowType();
-  if (["fedex", "co"].includes(mode)) {
+  if (["fedex", "co", "bk"].includes(mode)) {
     exportByKind(mode);
     return;
   }
@@ -3677,12 +3873,15 @@ function toggleExportMenu(event) {
 function addItem() {
   if (!state.current) return;
   const coMode = workflowType() === "co";
+  const bkMode = workflowType() === "bk";
   state.current.items.push({
     description_en: "",
     description_cn: "",
     hs_code: "",
     quantity: "",
-    unit: coMode ? "KGS G.W." : "PCS",
+    unit: coMode ? "KGS G.W." : bkMode ? "" : "PCS",
+    gross_weight: "",
+    weight_unit: "KGS",
     unit_price: "",
     unit_price_method: "manual",
     price_confirmed: true,

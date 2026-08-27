@@ -4,7 +4,7 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>外贸单证 Agent Demo</title>
-    <link rel="stylesheet" href="./styles.css?v=20260824-export-review" />
+    <link rel="stylesheet" href="./styles.css?v=20260827-bk" />
   </head>
   <body>
     <main class="shell">
@@ -102,6 +102,7 @@
                   <button type="button" data-export-kind="si">导出 SI</button>
                   <button type="button" data-export-kind="fedex">导出 FedEx PI</button>
                   <button type="button" data-export-kind="co">导出 CO</button>
+                  <button type="button" data-export-kind="bk">导出 BK</button>
                 </div>
               </div>
             </div>
@@ -115,6 +116,7 @@
               <button type="button" data-workflow-type="pipkg">PIPKG</button>
               <button type="button" data-workflow-type="fedex">FedEx</button>
               <button type="button" data-workflow-type="co">CO</button>
+              <button type="button" data-workflow-type="bk">BK</button>
             </div>
           </div>
 
@@ -152,13 +154,14 @@
                     <th>中文</th>
                     <th data-co-only>规格</th>
                     <th data-commercial-only>单价</th>
-                    <th id="quantityHeader">Quantity / m</th>
-                    <th>单位</th>
+                    <th id="quantityHeader" data-bk-hidden>Quantity / m</th>
+                    <th data-bk-hidden>单位</th>
                     <th data-commercial-only>总价</th>
-                    <th>HS code</th>
+                    <th data-bk-hidden>HS code</th>
                     <th data-fedex-only>材质</th>
                     <th data-fedex-only>用途</th>
-                    <th>来源</th>
+                    <th data-bk-only>毛重 (KGS)</th>
+                    <th data-bk-hidden>来源</th>
                     <th data-fedex-only>HS 参考</th>
                     <th class="row-action-col" aria-label="商品行操作">操作</th>
                   </tr>
@@ -223,6 +226,6 @@
     </dialog>
     <script src="./exceljs.min.js"></script>
     <script src="./fflate.min.js"></script>
-    <script src="./main.js?v=20260824-export-review"></script>
+    <script src="./main.js?v=20260827-bk"></script>
   </body>
 </html>
