@@ -23,6 +23,15 @@ let draftHistoryDbPromise;
 const fallbackKnowledge = {
   companies: [
     {
+      code: "HKFT",
+      keyword: "香港浮桐",
+      company: "FUTONG INTERNATIONAL LIMITED",
+      address: "RM 2502C, 25/F, 148 ELECTRIC ROAD,NORTH POINT HONG KONG",
+      contact: "LEE JONGIN +86 13112664569",
+      email: "jimmy@jimmylee.kr",
+      block: "FUTONG INTERNATIONAL LIMITED\nRM 2502C, 25/F, 148 ELECTRIC ROAD,NORTH POINT HONG KONG\nLEE JONGIN +86 13112664569\njimmy@jimmylee.kr",
+    },
+    {
       code: "FT",
       keyword: "FT",
       company: "GUANGZHOU FUTONG TRADING CO.,LTD",
@@ -153,7 +162,6 @@ const coFields = [
 const bkFields = [
   "booking_no",
   "shipper_block",
-  "shipper_phone",
   "shipper_fax",
   "shipper_contact",
   "consignee_company",
@@ -1662,7 +1670,7 @@ async function exportBkInBrowser(data) {
     V4: "",
     W3: fieldValue(data, "booking_no", ""),
     A3: fieldValue(data, "shipper_block", ""),
-    B8: fieldValue(data, "shipper_phone", ""),
+    B8: "",
     F8: fieldValue(data, "shipper_fax", ""),
     K8: fieldValue(data, "shipper_contact", ""),
     A10: fieldValue(data, "consignee_company", ""),
