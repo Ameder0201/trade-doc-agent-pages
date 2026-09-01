@@ -1259,8 +1259,96 @@ function sourceTotalNumber(totals, key) {
   return Number.isFinite(value) ? value : null;
 }
 
+function roundCbmNumber(value) {
+  const number = Number(value);
+  return Number.isFinite(number) ? Number(number.toFixed(2)) : value;
+}
+
+function cbmDisplay(value) {
+  const number = Number(value);
+  return Number.isFinite(number) ? number.toFixed(2) : "";
+}
+
+function sourceTotalForExport(data, key) {
+  const values = [
+    sourceTotalNumber(data?.fields, key),
+    sourceTotalNumber(data?.bl_totals, key),
+    sourceTotalNumber(data?.totals, key),
+  ];
+  return values.find((value) => Number(value) > 0);
+}
+
 function sumRowsNumber(rows, key) {
   return (rows || []).reduce((sum, row) => sum + Number(valueFromDraftField(row?.[key]) || 0), 0);
+}
+
+function syncEditableTotalsFromRows(data = state.current) {
+  if (!data) return;
+  data.totals = data.totals || {};
+  const packingLines = data.packing_lines || [];
+  if (packingLines.length) {
+    const quantity = sumRowsNumber(packingLines, "quantity");
+    const packages = sumRowsNumber(packingLines, "packages");
+    const grossWeight = sumRowsNumber(packingLines, "gross_weight");
+    const netWeight = sumRowsNumber(packingLines, "net_weight");
+    const cbm = roundCbmNumber(sumRowsNumber(packingLines, "cbm"));
+    data.totals = {
+      ...data.totals,
+      quantity,
+      packages,
+      gross_weight: grossWeight,
+      gross_weight_display: String(grossWeight),
+      net_weight: netWeight,
+      cbm,
+      cbm_display: cbmDisplay(cbm),
+      source: "manual_review",
+    };
+    data.bl_totals = {
+      ...(data.bl_totals || {}),
+      packages,
+      gross_weight: grossWeight,
+      gross_weight_display: String(grossWeight),
+      net_weight: netWeight,
+      cbm,
+      cbm_display: cbmDisplay(cbm),
+      source: "manual_review",
+    };
+    setDerivedFieldIfEmpty(data, "gross_weight", grossWeight, "从前端包装明细修改后自动汇总");
+    setDerivedFieldIfEmpty(data, "cbm", cbm, "从前端包装明细修改后自动汇总");
+    data.fields.gross_weight.value = grossWeight;
+    data.fields.gross_weight.confidence = "manual";
+    data.fields.cbm.value = cbm;
+    data.fields.cbm.confidence = "manual";
+    data.frontend_totals_source = "packing_manual";
+    return;
+  }
+  if (workflowType(data) === "bk" && (data.items || []).length) {
+    const grossWeight = sumRowsNumber(data.items, "gross_weight");
+    if (grossWeight > 0) {
+      data.totals.gross_weight = grossWeight;
+      data.totals.gross_weight_display = String(grossWeight);
+      setDerivedFieldIfEmpty(data, "gross_weight", grossWeight, "从前端 BK 货物毛重自动汇总");
+      data.fields.gross_weight.value = grossWeight;
+      data.fields.gross_weight.confidence = "manual";
+      data.frontend_totals_source = "items_manual";
+    }
+  }
+}
+
+function syncTotalFieldOverride(data, name, rawValue) {
+  if (!data || !["gross_weight", "cbm"].includes(name)) return;
+  const number = Number(String(rawValue || "").replace(/,/g, ""));
+  if (!Number.isFinite(number) || number <= 0) return;
+  const value = name === "cbm" ? roundCbmNumber(number) : number;
+  data.totals = { ...(data.totals || {}) };
+  data.bl_totals = { ...(data.bl_totals || {}) };
+  data.totals[name] = value;
+  data.bl_totals[name] = value;
+  data.totals[`${name}_display`] = name === "cbm" ? cbmDisplay(value) : String(value);
+  data.bl_totals[`${name}_display`] = data.totals[`${name}_display`];
+  data.totals.source = "manual_review";
+  data.bl_totals.source = "manual_review";
+  data.frontend_totals_source = "field_manual";
 }
 
 function firstContainerRows(data) {
@@ -1281,6 +1369,8 @@ function firstNonEmptyContainerValue(data, key) {
 }
 
 function pipkgTotalForBk(data, key) {
+  const fieldValue = sourceTotalNumber(data?.fields, key);
+  if (fieldValue > 0) return fieldValue;
   const blValue = sourceTotalNumber(data?.bl_totals, key);
   if (blValue > 0) return blValue;
   const totalValue = sourceTotalNumber(data?.totals, key);
@@ -1348,6 +1438,28 @@ function itemNameWithHsCode(description, hsCode) {
   return [name, code ? `HSCODE:${code}` : ""].filter(Boolean).join(" ");
 }
 
+function hsCodeByItemDescription(data) {
+  const byKey = new Map();
+  (data.items || []).forEach((item) => {
+    const code = String(item.hs_code || "").trim();
+    if (!code) return;
+    const keys = [
+      item.merge_key,
+      normalizePipkgDescription(item.description_en || item.description || ""),
+    ].filter(Boolean);
+    keys.forEach((key) => {
+      if (!byKey.has(key)) byKey.set(key, code);
+    });
+  });
+  return byKey;
+}
+
+function unifiedHsCode(row, data, lookup = hsCodeByItemDescription(data)) {
+  const direct = String(row.hs_code || "").trim();
+  if (direct) return direct;
+  return lookup.get(row.merge_key) || lookup.get(normalizePipkgDescription(row.description_en || row.description || "")) || "";
+}
+
 function wrappedTextLineCount(value, charactersPerLine) {
   return String(value || "").split(/\r?\n/).reduce((sum, line) => (
     sum + Math.max(1, Math.ceil(line.length / charactersPerLine))
@@ -1356,7 +1468,7 @@ function wrappedTextLineCount(value, charactersPerLine) {
 
 function pipkgRowHeight(value, charactersPerLine) {
   const lines = wrappedTextLineCount(value, charactersPerLine);
-  return Math.min(126, Math.max(18, lines * 16.5));
+  return Math.min(150, Math.max(20, lines * 19));
 }
 
 function setPipkgDescriptionCell(sheet, address, value, charactersPerLine) {
@@ -1407,6 +1519,7 @@ async function exportPipkgInBrowser(data) {
   clearWorkbookRows(pi, 19, 34, 1, 6);
   clearWorkbookRows(pkg, 15, 32, 1, 8);
   const items = (data.items || []).slice(0, 16);
+  const hsLookup = hsCodeByItemDescription(data);
   let totalQuantity = 0;
   let totalAmount = 0;
   items.forEach((item, index) => {
@@ -1414,7 +1527,7 @@ async function exportPipkgInBrowser(data) {
     const quantity = Number(item.quantity || 0);
     const unitPrice = Number(item.unit_price || 0);
     const amount = quantity * unitPrice;
-    setPipkgDescriptionCell(pi, `A${row}`, itemNameWithHsCode(item.description_en, item.hs_code), 36);
+    setPipkgDescriptionCell(pi, `A${row}`, itemNameWithHsCode(item.description_en, unifiedHsCode(item, data, hsLookup)), 30);
     setWorkbookCell(pi, `C${row}`, quantity);
     setWorkbookCell(pi, `D${row}`, normalizeQuantityUnit(item.unit));
     setWorkbookCell(pi, `E${row}`, unitPrice);
@@ -1434,15 +1547,16 @@ async function exportPipkgInBrowser(data) {
       D: Number(line.packages || 0),
       E: line.gross_weight === "" ? 0 : Number(line.gross_weight || 0),
       F: line.net_weight === "" ? 0 : Number(line.net_weight || 0),
-      G: line.cbm === "" ? 0 : Number(line.cbm || 0),
+      G: line.cbm === "" ? 0 : roundCbmNumber(line.cbm || 0),
     };
-    setPipkgDescriptionCell(pkg, `A${row}`, itemNameWithHsCode(line.description_en, line.hs_code), 46);
+    setPipkgDescriptionCell(pkg, `A${row}`, itemNameWithHsCode(line.description_en, unifiedHsCode(line, data, hsLookup)), 46);
     setWorkbookCell(pkg, `B${row}`, values.B);
     setWorkbookCell(pkg, `C${row}`, normalizeQuantityUnit(line.unit));
     setWorkbookCell(pkg, `D${row}`, values.D);
     setWorkbookCell(pkg, `E${row}`, line.gross_weight === "" ? "" : values.E);
     setWorkbookCell(pkg, `F${row}`, line.net_weight === "" ? "" : values.F);
     setWorkbookCell(pkg, `G${row}`, line.cbm === "" ? "" : values.G);
+    pkg.getCell(`G${row}`).numFmt = "#,##0.00";
     Object.keys(packingTotals).forEach((column) => {
       packingTotals[column] += values[column];
     });
@@ -1450,17 +1564,18 @@ async function exportPipkgInBrowser(data) {
   pi.getCell("C37").value = { formula: "SUM(C19:C34)", result: totalQuantity };
   pi.getCell("F37").value = { formula: "SUM(F19:F34)", result: totalAmount };
   pi.getCell("F37").numFmt = "#,##0.00";
-  const blGrossWeight = sourceTotalNumber(data.bl_totals, "gross_weight");
-  const blCbm = sourceTotalNumber(data.bl_totals, "cbm");
+  const blGrossWeight = sourceTotalForExport(data, "gross_weight");
+  const blCbm = sourceTotalForExport(data, "cbm");
   Object.entries(packingTotals).forEach(([column, result]) => {
-    const sourceValue = column === "E" ? blGrossWeight : column === "G" ? blCbm : null;
-    if (sourceValue !== null) {
+    const sourceValue = column === "E" ? blGrossWeight : column === "G" && blCbm !== undefined ? roundCbmNumber(blCbm) : null;
+    if (sourceValue !== null && sourceValue !== undefined) {
       setWorkbookCell(pkg, `${column}33`, sourceValue);
       const key = column === "E" ? "gross_weight" : "cbm";
-      pkg.getCell(`${column}33`).numFmt = sourceNumberFormat(data.bl_totals?.[`${key}_display`]);
+      pkg.getCell(`${column}33`).numFmt = key === "cbm" ? "#,##0.00" : sourceNumberFormat(data.bl_totals?.[`${key}_display`]);
       return;
     }
     pkg.getCell(`${column}33`).value = { formula: `SUM(${column}15:${column}32)`, result };
+    if (column === "G") pkg.getCell(`${column}33`).numFmt = "#,##0.00";
   });
   workbook.calcProperties.calcMode = "auto";
   workbook.calcProperties.fullCalcOnLoad = true;
@@ -2263,8 +2378,8 @@ function renderSummary() {
     ? Number(fieldValue(data, "total_packages", data.totals?.packages || 0))
     : (data.packing_lines || []).reduce((sum, item) => sum + Number(item.packages || 0), 0);
   const groupCount = (data.shipment_groups || []).length || 1;
-  const totalGross = Number(fieldValue(data, "gross_weight", data.totals?.gross_weight || (data.items || []).reduce((sum, item) => sum + Number(item.gross_weight || 0), 0)));
-  const totalCbm = Number(fieldValue(data, "cbm", data.totals?.cbm || 0));
+  const totalGross = Number(sourceTotalForExport(data, "gross_weight") || (data.items || []).reduce((sum, item) => sum + Number(item.gross_weight || 0), 0));
+  const totalCbm = Number(sourceTotalForExport(data, "cbm") || sumRowsNumber(data.packing_lines || [], "cbm") || 0);
   const typeLabel = mode === "fedex" ? "FedEx" : mode === "co" ? "CO" : mode === "bk" ? "BK" : data.case.shipment_type === "air" ? "空运 PIPKG" : "海运 PIPKG";
   const outputLabel = mode === "fedex" ? "Commercial Invoice" : mode === "co" ? "Certificate of Origin" : mode === "bk" ? "Booking Order" : `${groupCount} 组`;
   const cards = [
@@ -2274,7 +2389,7 @@ function renderSummary() {
     [mode === "pipkg" ? "提单组" : "输出", outputLabel],
     [["co", "bk"].includes(mode) ? "毛重" : "金额", ["co", "bk"].includes(mode) ? `${totalGross || "待补"} KGS` : `USD ${money(totalAmount)}`],
     ["商品", `${data.items.length} 行`],
-    [mode === "pipkg" ? "箱数" : mode === "bk" ? "体积" : "包裹", mode === "bk" ? `${totalCbm || "待补"} CBM` : totalPackages || "待补"],
+    [mode === "pipkg" ? "箱数" : mode === "bk" ? "体积" : "包裹", mode === "bk" ? `${totalCbm ? cbmDisplay(totalCbm) : "待补"} CBM` : totalPackages || "待补"],
     ["问题", `${data.issues.length} 个`],
     ["状态", data.issues.some((i) => i.level === "error") ? "待处理" : "可导出"],
   ];
@@ -2385,6 +2500,7 @@ function renderFields() {
     input.addEventListener("input", (event) => {
       const name = event.target.dataset.field;
       setField(name, event.target.value);
+      syncTotalFieldOverride(state.current, name, event.target.value);
       if (name === "shipper_block") {
         setField("shipper_code", "CUSTOM");
         const select = grid.querySelector('[data-party-select="shipper"]');
@@ -2525,6 +2641,9 @@ function bindTableInputs(tableName) {
         }
         renderPriceSummary();
       }
+      if (tableName === "items" && key === "gross_weight") {
+        syncEditableTotalsFromRows(state.current);
+      }
       if (tableName === "items" && workflowType() === "co" && ["quantity", "unit"].includes(key)) {
         const item = state.current.items[row];
         item.co_quantity_display = [item.quantity, item.unit].filter((value) => String(value ?? "").trim()).join(" ");
@@ -2543,7 +2662,8 @@ function bindTableInputs(tableName) {
           needs_confirmation: true,
         };
       }
-      if (tableName === "packing_lines" && ["gross_weight", "cbm"].includes(key)) {
+      if (tableName === "packing_lines" && ["quantity", "packages", "gross_weight", "net_weight", "cbm"].includes(key)) {
+        syncEditableTotalsFromRows(state.current);
         delete state.current.packing_reconciliation?.[key];
         renderReconciliation();
       }
@@ -2642,6 +2762,9 @@ function deleteTableRow(tableName, rowIndex) {
   if (!state.current?.[tableName]?.[rowIndex]) return;
   state.current[tableName].splice(rowIndex, 1);
   reconcileIssuesAfterRowDelete(tableName, rowIndex);
+  if (tableName === "packing_lines" || (tableName === "items" && workflowType() === "bk")) {
+    syncEditableTotalsFromRows(state.current);
+  }
   markDirty();
   if (tableName === "items") {
     renderItems();
@@ -2787,7 +2910,6 @@ function renderPacking() {
         <td>${editableCell(line.gross_weight, "gross_weight", index, "packing_lines")}</td>
         <td>${editableCell(line.net_weight, "net_weight", index, "packing_lines")}</td>
         <td>${editableCell(line.cbm, "cbm", index, "packing_lines")}</td>
-        <td>${editableCell(line.hs_code, "hs_code", index, "packing_lines")}</td>
         <td class="row-action-cell">
           <button type="button" class="row-delete-button" data-delete-table="packing_lines" data-delete-row="${index}" title="删除此包装行" aria-label="删除第 ${index + 1} 个包装行">×</button>
         </td>
@@ -3405,11 +3527,18 @@ function syncCurrentGroup() {
   group.issues = cloneJson(state.current.issues || []);
   group.packing_reconciliation = cloneJson(state.current.packing_reconciliation || {});
   group.frontend_saved_at = new Date().toISOString();
+  group.frontend_totals_source = state.current.frontend_totals_source || group.frontend_totals_source || "";
   group.totals = group.totals || {};
   group.totals.quantity = (state.current.items || []).reduce((sum, item) => sum + Number(item.quantity || 0), 0);
   group.totals.amount = Number((state.current.items || []).reduce((sum, item) => sum + Number(item.amount || 0), 0).toFixed(2));
   group.totals.packages = (state.current.packing_lines || []).reduce((sum, line) => sum + Number(line.packages || 0), 0);
   group.totals.net_weight = (state.current.packing_lines || []).reduce((sum, line) => sum + Number(line.net_weight || 0), 0);
+  if ((state.current.packing_lines || []).length) {
+    group.totals.gross_weight = (state.current.packing_lines || []).reduce((sum, line) => sum + Number(line.gross_weight || 0), 0);
+    group.totals.gross_weight_display = String(group.totals.gross_weight);
+    group.totals.cbm = roundCbmNumber((state.current.packing_lines || []).reduce((sum, line) => sum + Number(line.cbm || 0), 0));
+    group.totals.cbm_display = cbmDisplay(group.totals.cbm);
+  }
   groups[state.activeGroupIndex] = group;
 }
 
@@ -3441,6 +3570,7 @@ function buildEditableDraftPayload() {
   payload.knowledge_feedback = cloneJson(state.current?.knowledge_feedback || payload.knowledge_feedback || []);
   payload.fedex_pricing = cloneJson(state.current?.fedex_pricing || payload.fedex_pricing || {});
   payload.si = cloneJson(state.current?.si || payload.si || {});
+  payload.frontend_totals_source = state.current?.frontend_totals_source || payload.frontend_totals_source || "";
   const groups = mode === "pipkg" ? state.current?.shipment_groups || [] : [];
   if (groups.length) {
     payload.shipment_groups = cloneJson(groups);
@@ -3599,6 +3729,7 @@ function applyDraft(payload) {
     fedex_pricing: cloneJson(draft.fedex_pricing || { estimated_total_cap_usd: 80, contains_ai_estimates: false }),
     totals: cloneJson(draft.totals || {}),
     si: cloneJson(draft.si || {}),
+    frontend_totals_source: draft.frontend_totals_source || "",
   };
   Object.entries(draft.fields || {}).forEach(([key, field]) => {
     const value = valueFromDraftField(field);
@@ -3853,11 +3984,12 @@ function normalizePipkgUnit(value) {
   return aliases[unit.replace(/\s+/g, "")] || unit;
 }
 
-function pipkgComparisonRows(rows = []) {
+function pipkgComparisonRows(rows = [], data = state.current) {
   const aggregated = new Map();
+  const lookup = hsCodeByItemDescription(data || {});
   rows.forEach((row) => {
     const description = normalizePipkgDescription(row.description_en || row.description || "") || "未命名商品";
-    const hsCode = normalizeHsCode(row.hs_code);
+    const hsCode = normalizeHsCode(unifiedHsCode(row, data || {}, lookup));
     const unit = normalizePipkgUnit(row.unit || row.pipkg_quantity_unit || row.quantity_source_unit);
     const quantity = Number(firstDefined(row.quantity, row.pipkg_quantity, row.quantity_source, NaN));
     const key = `${description}|${hsCode}|${unit}`;
@@ -3887,8 +4019,8 @@ function pipkgRowLabel(row) {
 }
 
 function comparePipkgContent(data) {
-  const piRows = pipkgComparisonRows(data.items || []);
-  const pkgRows = pipkgComparisonRows(data.packing_lines || []);
+  const piRows = pipkgComparisonRows(data.items || [], data);
+  const pkgRows = pipkgComparisonRows(data.packing_lines || [], data);
   const mismatches = [];
   const keys = new Set([...piRows.keys(), ...pkgRows.keys()]);
   keys.forEach((key) => {
@@ -3953,6 +4085,7 @@ async function exportByKind(kind) {
     `;
     return;
   }
+  if (state.current.frontend_totals_source) syncEditableTotalsFromRows(state.current);
   await validateCurrent();
   const exportIssues = state.current.issues
     .filter((issue) => ["error", "warning"].includes(issue.level))
@@ -4068,6 +4201,7 @@ function addPacking() {
     source: "manual",
     confidence: "manual",
   });
+  syncEditableTotalsFromRows(state.current);
   markDirty();
   renderPacking();
   renderSummary();
