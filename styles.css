@@ -608,9 +608,24 @@ p {
   font-weight: 700;
 }
 
+.shipment-switch-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+  min-width: 0;
+}
+
+.secondary-action {
+  color: var(--accent-strong);
+  border-color: #b8d8cc;
+  background: #fff;
+  white-space: nowrap;
+}
+
 .segmented-control {
   display: grid;
-  grid-template-columns: repeat(3, minmax(84px, 1fr));
+  grid-template-columns: repeat(4, minmax(76px, 1fr));
   border: 1px solid var(--line);
   border-radius: 6px;
   overflow: hidden;

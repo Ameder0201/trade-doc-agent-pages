@@ -91,6 +91,8 @@ const fieldLabels = {
   gross_weight: "总毛重",
   si_template: "SI模板",
   container_qty: "柜量",
+  container_no: "柜号",
+  seal_no: "封条号",
   vessel_voyage: "船名航次",
   bill_of_lading_no: "提单号",
   consignee_postcode: "收货人邮编",
@@ -174,6 +176,8 @@ const bkFields = [
   "place_of_delivery",
   "service_term",
   "container_qty",
+  "container_no",
+  "seal_no",
   "freight_term",
   "marks",
   "gross_weight",
@@ -192,6 +196,8 @@ const invoiceNumberPattern = /^(FT|KL)(01|02)\d{6}\d{2}$/;
 const siFields = [
   "si_template",
   "container_qty",
+  "container_no",
+  "seal_no",
   "vessel_voyage",
   "bill_of_lading_no",
 ];
@@ -1029,7 +1035,10 @@ function reconcilePackingTotals(data, applyAdjustment = true) {
 
 function validateInBrowser(data) {
   applyDefaultNetWeights(data);
-  const shipmentType = data.case?.shipment_type;
+  const shipmentType = data.case?.shipment_type || data.shipment_type;
+  if (shipmentType === "bk" || data.document_type === "booking_order") {
+    hydrateBkFromPipkgData(data);
+  }
   let reconciliation = {};
   if (["co", "bk"].includes(shipmentType) || ["certificate_of_origin", "booking_order"].includes(data.document_type)) {
     delete data.packing_reconciliation;
@@ -1250,6 +1259,83 @@ function sourceTotalNumber(totals, key) {
   return Number.isFinite(value) ? value : null;
 }
 
+function sumRowsNumber(rows, key) {
+  return (rows || []).reduce((sum, row) => sum + Number(valueFromDraftField(row?.[key]) || 0), 0);
+}
+
+function firstContainerRows(data) {
+  const containers = [
+    ...(data?.si?.containers || []),
+    ...((data?.shipment_groups || []).flatMap((group) => group.si?.containers || [])),
+    ...((data?.items || []).flatMap((item) => item.container_breakdown || [])),
+    ...((data?.packing_lines || []).flatMap((line) => line.container_breakdown || [])),
+  ];
+  return containers.filter((container) => container && typeof container === "object");
+}
+
+function firstNonEmptyContainerValue(data, key) {
+  const values = [...new Set(firstContainerRows(data)
+    .map((container) => String(valueFromDraftField(container[key]) || "").trim())
+    .filter(Boolean))];
+  return values.length === 1 ? values[0] : values.join("\n");
+}
+
+function pipkgTotalForBk(data, key) {
+  const blValue = sourceTotalNumber(data?.bl_totals, key);
+  if (blValue > 0) return blValue;
+  const totalValue = sourceTotalNumber(data?.totals, key);
+  if (totalValue > 0) return totalValue;
+  const packingValue = sumRowsNumber(data?.packing_lines, key);
+  if (packingValue > 0) return packingValue;
+  const itemValue = key === "gross_weight" ? sumRowsNumber(data?.items, "gross_weight") : 0;
+  return itemValue > 0 ? itemValue : undefined;
+}
+
+function setDerivedFieldIfEmpty(data, name, value, sourceText) {
+  if (value === undefined || value === null || value === "") return;
+  if (data.fields?.[name]?.value !== undefined && data.fields[name].value !== null && data.fields[name].value !== "") return;
+  data.fields[name] = {
+    value,
+    confidence: "medium",
+    evidence: [{ file: "pipkg_data", locator: name, text: sourceText }],
+  };
+}
+
+function hydrateBkFromPipkgData(data = state.current) {
+  if (!data || workflowType(data) !== "bk") return;
+  if (!data.fields) data.fields = {};
+  const packingLines = data.packing_lines || [];
+  const existingBkItemsHaveWeight = (data.items || []).some((item) => Number(item.gross_weight || 0) > 0);
+  if (packingLines.length && !existingBkItemsHaveWeight) {
+    const rows = new Map();
+    packingLines.forEach((line) => {
+      const description = String(line.description_en || line.description_cn || "").trim();
+      if (!description) return;
+      const key = normalizePipkgDescription(description) || description;
+      const current = rows.get(key) || {
+        description_en: description,
+        description_cn: line.description_cn || "",
+        gross_weight: 0,
+        weight_unit: "KGS",
+        source: "PIPKG 包装明细",
+        confidence: line.confidence || "medium",
+      };
+      current.gross_weight += Number(line.gross_weight || 0);
+      rows.set(key, current);
+    });
+    if (rows.size) {
+      data.items = [...rows.values()].map((item) => ({
+        ...item,
+        gross_weight: Number(item.gross_weight.toFixed(3)),
+      }));
+    }
+  }
+  setDerivedFieldIfEmpty(data, "gross_weight", pipkgTotalForBk(data, "gross_weight"), "从 PIPKG 提单总值或包装明细汇总带入");
+  setDerivedFieldIfEmpty(data, "cbm", pipkgTotalForBk(data, "cbm"), "从 PIPKG 提单总值或包装明细汇总带入");
+  setDerivedFieldIfEmpty(data, "container_no", firstNonEmptyContainerValue(data, "container_no"), "从 PIPKG/SI 柜号预分配带入");
+  setDerivedFieldIfEmpty(data, "seal_no", firstNonEmptyContainerValue(data, "seal_no"), "从 PIPKG/SI 封条号预分配带入");
+}
+
 function sourceNumberFormat(display, fallbackDecimals = 3) {
   const text = String(valueFromDraftField(display) || "").replace(/,/g, "").trim();
   const decimals = text.includes(".") ? text.split(".").pop().length : text ? 0 : fallbackDecimals;
@@ -1260,6 +1346,25 @@ function itemNameWithHsCode(description, hsCode) {
   const name = String(description || "").trim();
   const code = String(hsCode || "").trim();
   return [name, code ? `HSCODE:${code}` : ""].filter(Boolean).join(" ");
+}
+
+function wrappedTextLineCount(value, charactersPerLine) {
+  return String(value || "").split(/\r?\n/).reduce((sum, line) => (
+    sum + Math.max(1, Math.ceil(line.length / charactersPerLine))
+  ), 0);
+}
+
+function pipkgRowHeight(value, charactersPerLine) {
+  const lines = wrappedTextLineCount(value, charactersPerLine);
+  return Math.min(126, Math.max(18, lines * 16.5));
+}
+
+function setPipkgDescriptionCell(sheet, address, value, charactersPerLine) {
+  const cell = sheet.getCell(address);
+  cell.value = value || "";
+  cell.alignment = { ...(cell.alignment || {}), wrapText: true, vertical: "middle" };
+  const row = sheet.getRow(cell.row);
+  row.height = Math.max(row.height || 0, pipkgRowHeight(value, charactersPerLine));
 }
 
 function companyTitleFromBlock(value) {
@@ -1309,7 +1414,7 @@ async function exportPipkgInBrowser(data) {
     const quantity = Number(item.quantity || 0);
     const unitPrice = Number(item.unit_price || 0);
     const amount = quantity * unitPrice;
-    setWorkbookCell(pi, `A${row}`, itemNameWithHsCode(item.description_en, item.hs_code));
+    setPipkgDescriptionCell(pi, `A${row}`, itemNameWithHsCode(item.description_en, item.hs_code), 36);
     setWorkbookCell(pi, `C${row}`, quantity);
     setWorkbookCell(pi, `D${row}`, normalizeQuantityUnit(item.unit));
     setWorkbookCell(pi, `E${row}`, unitPrice);
@@ -1331,7 +1436,7 @@ async function exportPipkgInBrowser(data) {
       F: line.net_weight === "" ? 0 : Number(line.net_weight || 0),
       G: line.cbm === "" ? 0 : Number(line.cbm || 0),
     };
-    setWorkbookCell(pkg, `A${row}`, itemNameWithHsCode(line.description_en, line.hs_code));
+    setPipkgDescriptionCell(pkg, `A${row}`, itemNameWithHsCode(line.description_en, line.hs_code), 46);
     setWorkbookCell(pkg, `B${row}`, values.B);
     setWorkbookCell(pkg, `C${row}`, normalizeQuantityUnit(line.unit));
     setWorkbookCell(pkg, `D${row}`, values.D);
@@ -1653,8 +1758,20 @@ function bkCargoBlock(data) {
     .join("\n");
 }
 
+function bkContainerSummary(data) {
+  const containerQty = String(fieldValue(data, "container_qty", "") || "").trim();
+  const containerNo = String(fieldValue(data, "container_no", "") || "").trim();
+  const sealNo = String(fieldValue(data, "seal_no", "") || "").trim();
+  return [
+    containerQty,
+    containerNo ? `CONT NO.: ${containerNo}` : "",
+    sealNo ? `SEAL NO.: ${sealNo}` : "",
+  ].filter(Boolean).join("\n");
+}
+
 async function exportBkInBrowser(data) {
   if (!window.ExcelJS) throw new Error("Excel 导出组件未加载");
+  hydrateBkFromPipkgData(data);
   const response = await fetch("./templates/NanshaBookingOrderTemplate.xlsx?v=20260827-bk");
   if (!response.ok) throw new Error("无法读取 BK 模板");
   const workbook = new window.ExcelJS.Workbook();
@@ -1681,7 +1798,7 @@ async function exportBkInBrowser(data) {
     A24: fieldValue(data, "vessel_voyage", ""),
     H24: fieldValue(data, "loading_port", "NANSHA"),
     P18: fieldValue(data, "service_term", "CY/CY"),
-    AA21: fieldValue(data, "container_qty", ""),
+    AA21: bkContainerSummary(data),
     P24: freightTerm === "FREIGHT PREPAID" ? "√" : "",
     W24: freightTerm === "FREIGHT COLLECT" ? "√" : "",
     A27: fieldValue(data, "destination_port", "SHUWAIKH"),
@@ -1693,6 +1810,8 @@ async function exportBkInBrowser(data) {
     Y31: cbm > 0 ? `${bkWeightDisplay(cbm)} CBM` : "",
   };
   Object.entries(values).forEach(([cell, value]) => setWorkbookCell(sheet, cell, value));
+  sheet.getCell("AA21").alignment = { ...(sheet.getCell("AA21").alignment || {}), wrapText: true, vertical: "middle" };
+  sheet.getRow(21).height = Math.max(sheet.getRow(21).height || 0, wrappedTextLineCount(values.AA21, 18) * 15);
   const blob = new Blob(
     [await workbook.xlsx.writeBuffer()],
     { type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" },
@@ -1924,6 +2043,7 @@ function ensureDefaultInvoiceFields() {
 function ensureBkDefaultFields() {
   if (!state.current) return;
   if (!state.current.fields) state.current.fields = {};
+  hydrateBkFromPipkgData(state.current);
   const defaults = {
     notify_party: "SAME AS CONSIGNEE",
     loading_port: "NANSHA",
@@ -1940,6 +2060,7 @@ function ensureBkDefaultFields() {
       evidence: [{ file: "NANSHA BK.xlsx", locator: name, text: "BK 模板默认值，可在导出前修改" }],
     };
   });
+  hydrateBkFromPipkgData(state.current);
 }
 
 function ensureFedexDefaultFields() {
@@ -2700,6 +2821,7 @@ function recalculateCurrent() {
   } else {
     delete state.current.packing_reconciliation;
   }
+  if (workflowType() === "bk") hydrateBkFromPipkgData(state.current);
   renderItems();
   renderPacking();
   renderSummary();
@@ -3266,9 +3388,16 @@ function syncCurrentGroup() {
   group.si = group.si || {};
   const siTemplate = currentFieldCopy("si_template");
   const containerQty = currentFieldCopy("container_qty");
+  const containerNo = currentFieldCopy("container_no");
+  const sealNo = currentFieldCopy("seal_no");
   const vesselVoyage = currentFieldCopy("vessel_voyage");
   if (siTemplate) group.si.si_template = valueFromDraftField(siTemplate);
   if (containerQty) group.si.container_qty = containerQty;
+  if (containerNo || sealNo) {
+    group.si.containers = group.si.containers?.length ? group.si.containers : [{}];
+    if (containerNo) group.si.containers[0].container_no = valueFromDraftField(containerNo);
+    if (sealNo) group.si.containers[0].seal_no = valueFromDraftField(sealNo);
+  }
   if (vesselVoyage) group.si.vessel_voyage = vesselVoyage;
 
   group.items = mergeCurrentItems(group.items || [], state.current.items || []);
@@ -3311,6 +3440,7 @@ function buildEditableDraftPayload() {
   payload.knowledge_candidates = cloneJson(state.current?.knowledge_candidates || payload.knowledge_candidates || []);
   payload.knowledge_feedback = cloneJson(state.current?.knowledge_feedback || payload.knowledge_feedback || []);
   payload.fedex_pricing = cloneJson(state.current?.fedex_pricing || payload.fedex_pricing || {});
+  payload.si = cloneJson(state.current?.si || payload.si || {});
   const groups = mode === "pipkg" ? state.current?.shipment_groups || [] : [];
   if (groups.length) {
     payload.shipment_groups = cloneJson(groups);
@@ -3364,6 +3494,8 @@ function applyShipmentGroup(group, index = 0) {
   if (state.activeGroupIndex >= 0) syncCurrentGroup();
   state.activeGroupIndex = index;
   state.current.active_group_id = group.group_id || valueFromDraftField(group.bill_of_lading_no) || "";
+  state.current.si = cloneJson(group.si || {});
+  const groupContainers = group.si?.containers || [];
   const mapped = {
     invoice_no: group.invoice_no,
     invoice_date: group.invoice_date,
@@ -3379,6 +3511,8 @@ function applyShipmentGroup(group, index = 0) {
     payment_term: firstDraftField(group, ["payment_term", "terms_of_payment", "payment_terms"]),
     gross_weight: firstDraftField(group, ["gross_weight"]) ?? group.totals?.gross_weight,
     container_qty: group.si?.container_qty,
+    container_no: firstDraftField(group.si || {}, ["container_no"]) ?? groupContainers[0]?.container_no,
+    seal_no: firstDraftField(group.si || {}, ["seal_no"]) ?? groupContainers[0]?.seal_no,
     vessel_voyage: group.si?.vessel_voyage,
     si_template: group.si?.si_template || group.si?.carrier,
   };
@@ -3464,6 +3598,7 @@ function applyDraft(payload) {
     knowledge_feedback: cloneJson(draft.knowledge_feedback || []),
     fedex_pricing: cloneJson(draft.fedex_pricing || { estimated_total_cap_usd: 80, contains_ai_estimates: false }),
     totals: cloneJson(draft.totals || {}),
+    si: cloneJson(draft.si || {}),
   };
   Object.entries(draft.fields || {}).forEach(([key, field]) => {
     const value = valueFromDraftField(field);
@@ -3509,6 +3644,7 @@ function applyDraft(payload) {
     if (shipmentType === "sea" && draft.shipment_groups?.length > 1) openTab("groups");
     if (shipmentType === "fedex") openTab("fields");
     if (shipmentType === "co") openTab("fields");
+    if (shipmentType === "bk") openTab("fields");
   }
 }
 
@@ -3557,6 +3693,19 @@ function clearSourceFiles() {
   qs("selectedSourceFiles").replaceChildren();
   qs("selectedSourceFiles").hidden = true;
   qs("sourceExtractStatus").textContent = "";
+}
+
+function openImportPanel() {
+  document.body.classList.remove("sidebar-collapsed");
+  updateSidebarToggle();
+  setSourceView("import");
+  qs("draftImportPanel").open = true;
+  qs("draftText").focus();
+  try {
+    window.localStorage.setItem("tradeDocSidebarCollapsed", "false");
+  } catch {
+    // The import panel can still open for this session.
+  }
 }
 
 function requestSourceExtraction() {
@@ -3949,6 +4098,7 @@ function bindActions() {
   qs("scanButton").addEventListener("click", () => scanFolder(qs("folderInput").value));
   qs("saveButton").addEventListener("click", persistCurrentDraft);
   qs("validateButton").addEventListener("click", validateCurrent);
+  qs("openImportButton").addEventListener("click", openImportPanel);
   qs("exportButton").addEventListener("click", toggleExportMenu);
   qs("exportMenu").querySelectorAll("[data-export-kind]").forEach((button) => {
     button.addEventListener("click", (event) => {

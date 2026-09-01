@@ -4,7 +4,7 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>外贸单证 Agent Demo</title>
-    <link rel="stylesheet" href="./styles.css?v=20260827-bk" />
+    <link rel="stylesheet" href="./styles.css?v=20260901-bk-pipkg" />
   </head>
   <body>
     <main class="shell">
@@ -112,11 +112,14 @@
 
           <div class="shipment-switch" role="group" aria-label="制单类型">
             <span>制单类型</span>
-            <div class="segmented-control">
-              <button type="button" data-workflow-type="pipkg">PIPKG</button>
-              <button type="button" data-workflow-type="fedex">FedEx</button>
-              <button type="button" data-workflow-type="co">CO</button>
-              <button type="button" data-workflow-type="bk">BK</button>
+            <div class="shipment-switch-actions">
+              <button type="button" class="secondary-action" id="openImportButton">导入JSON</button>
+              <div class="segmented-control">
+                <button type="button" data-workflow-type="pipkg">PIPKG</button>
+                <button type="button" data-workflow-type="fedex">FedEx</button>
+                <button type="button" data-workflow-type="co">CO</button>
+                <button type="button" data-workflow-type="bk">BK</button>
+              </div>
             </div>
           </div>
 
@@ -226,6 +229,6 @@
     </dialog>
     <script src="./exceljs.min.js"></script>
     <script src="./fflate.min.js"></script>
-    <script src="./main.js?v=20260827-bk"></script>
+    <script src="./main.js?v=20260901-bk-pipkg"></script>
   </body>
 </html>
