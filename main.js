@@ -118,6 +118,7 @@ const fieldLabels = {
   freight_term: "运费条款",
   marks: "唛头",
   cbm: "总体积 (CBM)",
+  bill_type: "提单类型",
 };
 
 const seaFields = [
@@ -200,6 +201,16 @@ const siFields = [
   "seal_no",
   "vessel_voyage",
   "bill_of_lading_no",
+  "booking_no",
+  "notify_party",
+  "service_term",
+  "freight_term",
+  "bill_type",
+  "place_of_delivery",
+  "marks",
+  "total_packages",
+  "gross_weight",
+  "cbm",
 ];
 
 function qs(id) {
@@ -1940,6 +1951,187 @@ async function exportBkInBrowser(data) {
   return anchor.download;
 }
 
+function siFieldValue(data, name, fallback = "") {
+  const value = fieldValue(data, name, null);
+  return value === null || value === "" ? valueFromDraftField(data.si?.[name]) ?? fallback : value;
+}
+
+function siPositiveNumber(value) {
+  if (value === null || value === undefined || String(value).trim() === "") return null;
+  const number = Number(String(value).replace(/,/g, ""));
+  return Number.isFinite(number) && number > 0 ? number : null;
+}
+
+function siCompleteTotal(rows, key) {
+  const values = rows.map((row) => siPositiveNumber(row[key]));
+  return values.length && values.every((value) => value !== null)
+    ? Number(values.reduce((sum, value) => sum + value, 0).toFixed(6)) : null;
+}
+
+function siExportData(data) {
+  const items = data.items || [];
+  const rows = (data.packing_lines?.length ? data.packing_lines : items).map((row) => {
+    const original = items.find((item) => row.merge_key && item.merge_key === row.merge_key)
+      || items.find((item) => normalizePipkgDescription(item.description_en) === normalizePipkgDescription(row.description_en));
+    return {
+      ...row,
+      hs_code: unifiedHsCode(row, data),
+      hs_code_list: row.hs_code_list?.length ? row.hs_code_list : original?.hs_code_list || [],
+    };
+  });
+  const containers = cloneJson(data.si?.containers || []);
+  if (!containers.length) containers.push({});
+  for (const key of ["container_no", "seal_no"]) {
+    const edited = fieldValue(data, key, "");
+    if (edited) containers[0][key] = String(edited);
+  }
+  const totals = {};
+  const source = data.bl_totals || data.totals || {};
+  for (const key of ["packages", "gross_weight", "cbm"]) {
+    const field = key === "packages" ? "total_packages" : key;
+    const override = data.si_total_overrides?.[key];
+    const completeRows = siCompleteTotal(rows, key);
+    // Never turn a partial packing sum into a final SI total.
+    totals[key] = override ? siPositiveNumber(fieldValue(data, field))
+      : data.frontend_totals_source === "packing_manual" ? completeRows
+      : (source.source === "incomplete_loading_data" || source.totals_source === "incomplete_loading_data" ? null : siPositiveNumber(source[key]))
+        ?? siCompleteTotal(containers, key) ?? completeRows;
+  }
+  return { rows, containers, totals };
+}
+
+function siExportIssues(data, payload = siExportData(data)) {
+  const issues = [];
+  const add = (type, message, field, level = "error") => issues.push({ type, message, field, level });
+  for (const key of ["shipper_block", "consignee_company", "vessel_voyage", "loading_port", "destination_port"]) {
+    if (!String(siFieldValue(data, key) || "").trim()) add("si_missing_field", `SI 缺少${fieldLabels[key] || key}`, key);
+  }
+  if (!siFieldValue(data, "booking_no") && !siFieldValue(data, "bill_of_lading_no")) {
+    add("si_missing_reference", "SI 缺少订舱号或提单号", "booking_no");
+  }
+  payload.containers.forEach((container, index) => {
+    for (const key of ["container_no", "seal_no"]) {
+      if (!container[key]) add("si_missing_container_field", `第 ${index + 1} 个柜缺少${fieldLabels[key]}`, `si.containers[${index}].${key}`);
+    }
+  });
+  if (!payload.rows.length) add("si_missing_cargo", "SI 缺少货物明细", "packing_lines");
+  payload.rows.forEach((row, index) => {
+    if (!row.description_en) add("si_missing_description", `第 ${index + 1} 行缺少英文品名`, `packing_lines[${index}].description_en`);
+    for (const key of ["packages", "gross_weight"]) {
+      if (siPositiveNumber(row[key]) === null) add("si_missing_cargo_data", `第 ${index + 1} 行${key === "packages" ? "包装件数" : "毛重"}待确认，草稿将显示 TBC`, `packing_lines[${index}].${key}`);
+    }
+    if (!row.hs_code && !row.hs_code_list.length) add("si_missing_hs", `第 ${index + 1} 行 HS Code 待确认`, `items[${index}].hs_code`, "warning");
+    if (row.hs_code_reference?.needs_confirmation) add("si_hs_review", `第 ${index + 1} 行 HS Code 为待核验参考`, `items[${index}].hs_code`, "warning");
+  });
+  for (const key of ["packages", "gross_weight", "cbm"]) {
+    if (payload.totals[key] === null) add("si_missing_total", `SI 总${key === "packages" ? "包装件数" : key === "gross_weight" ? "毛重" : "体积"}待确认，草稿将显示 TBC`, key);
+    const detail = siCompleteTotal(payload.rows, key);
+    const total = payload.totals[key];
+    const tolerance = key === "packages" ? 0 : reconciliationTolerance(key, total || 0);
+    if (detail !== null && total !== null && Math.abs(detail - total) > tolerance) {
+      add("si_total_mismatch", `SI ${key === "packages" ? "包装件数" : key === "gross_weight" ? "毛重" : "体积"}明细合计 ${detail} 与总值 ${total} 不一致`, key, "warning");
+    }
+  }
+  return issues;
+}
+
+function prepareSiWorkbookLayout(sheet, rowCount) {
+  for (const range of ["A29:A41", "C41:D41", "A42:D42", "B43:H45"]) safeUnmergeWorkbookCells(sheet, range);
+  for (let row = 29; row <= 40; row += 1) safeUnmergeWorkbookCells(sheet, `B${row}:E${row}`);
+  const extra = Math.max(0, rowCount - 12);
+  if (extra) {
+    sheet.insertRows(41, Array.from({ length: extra }, () => Array(8).fill(null)), "i");
+    for (let row = 41; row < 41 + extra; row += 1) {
+      for (let column = 1; column <= 8; column += 1) sheet.getCell(row, column).style = cloneWorkbookStyle(sheet.getCell(40, column).style);
+    }
+  }
+  const containerRow = 41 + extra;
+  for (let row = 29; row < containerRow; row += 1) {
+    sheet.mergeCells(`B${row}:E${row}`);
+    for (let column = 2; column <= 8; column += 1) sheet.getCell(row, column).value = null;
+  }
+  sheet.mergeCells(`A29:A${containerRow}`);
+  sheet.mergeCells(`B${containerRow}:E${containerRow}`);
+  sheet.mergeCells(`F${containerRow}:H${containerRow}`);
+  sheet.mergeCells(`A${containerRow + 1}:D${containerRow + 1}`);
+  sheet.mergeCells(`B${containerRow + 2}:H${containerRow + 4}`);
+  sheet.pageSetup = { ...sheet.pageSetup, orientation: "portrait", paperSize: 9, fitToPage: true, fitToWidth: 1, fitToHeight: 0, printArea: `A1:H${containerRow + 4}`, printTitlesRow: "28:28" };
+  return containerRow;
+}
+
+async function exportSiInBrowser(data) {
+  if (!window.ExcelJS) throw new Error("Excel 导出组件未加载");
+  const response = await fetch("./templates/ShippingInstructionTemplate.xlsx?v=20261012-si");
+  if (!response.ok) throw new Error("无法读取 SI 模板");
+  const workbook = new window.ExcelJS.Workbook();
+  await workbook.xlsx.load(await response.arrayBuffer());
+  const sheet = workbook.getWorksheet("Sheet1") || workbook.worksheets[0];
+  const payload = siExportData(data);
+  const issues = siExportIssues(data, payload);
+  const draft = issues.some((issue) => issue.level === "error");
+  const containerRow = prepareSiWorkbookLayout(sheet, payload.rows.length);
+  const values = {
+    A1: draft ? "SI DRAFT / 提单补料草稿（待确认）" : "提单补料模板",
+    B2: siFieldValue(data, "vessel_voyage"),
+    B3: siFieldValue(data, "bill_of_lading_no") || siFieldValue(data, "booking_no"),
+    G3: siFieldValue(data, "service_term") || "TBC",
+    B4: siFieldValue(data, "container_qty"),
+    E4: siFieldValue(data, "freight_term"),
+    H4: siFieldValue(data, "bill_type") || "TBC",
+    B5: siFieldValue(data, "shipper_block"),
+    B10: siFieldValue(data, "consignee_company"),
+    B15: siFieldValue(data, "notify_party", "SAME AS CONSIGNEE"),
+    B20: siFieldValue(data, "loading_port"),
+    E20: siFieldValue(data, "destination_port"),
+    H20: siFieldValue(data, "place_of_delivery") || "TBC",
+    B21: siFieldValue(data, "marks", "N/M"),
+  };
+  Object.entries(values).forEach(([cell, value]) => setWorkbookCell(sheet, cell, value));
+  for (const address of ["B3", "H4"]) sheet.getCell(address).numFmt = "@";
+  for (const address of ["B5", "B10", "B15"]) {
+    sheet.getCell(address).alignment = { ...sheet.getCell(address).alignment, horizontal: "left", vertical: "middle", wrapText: true };
+    const start = sheet.getCell(address).row;
+    const height = Math.max(18, wrappedTextLineCount(values[address], 80) * 16 / 5);
+    for (let row = start; row < start + 5; row += 1) sheet.getRow(row).height = height;
+  }
+  payload.rows.forEach((row, index) => {
+    const number = 29 + index;
+    const codes = row.hs_code || row.hs_code_list.join("\n");
+    setWorkbookCell(sheet, `B${number}`, row.description_en);
+    setWorkbookCell(sheet, `F${number}`, siPositiveNumber(row.packages) ?? "TBC");
+    setWorkbookCell(sheet, `G${number}`, siPositiveNumber(row.gross_weight) ?? "TBC");
+    setWorkbookCell(sheet, `H${number}`, codes || "TBC");
+    sheet.getCell(`G${number}`).numFmt = "#,##0.###";
+    sheet.getCell(`H${number}`).numFmt = "@";
+    for (const column of ["B", "F", "G", "H"]) sheet.getCell(`${column}${number}`).alignment = { wrapText: true, vertical: "middle", horizontal: column === "B" ? "left" : "center" };
+    sheet.getRow(number).height = Math.max(24, wrappedTextLineCount(row.description_en, 52) * 16, wrappedTextLineCount(codes, 18) * 16);
+  });
+  setWorkbookCell(sheet, `B${containerRow}`, payload.containers.map((container) => `CONT NO.: ${container.container_no || "TBC"}`).join("\n"));
+  setWorkbookCell(sheet, `F${containerRow}`, payload.containers.map((container) => `SEAL NO.: ${container.seal_no || "TBC"}`).join("\n"));
+  sheet.getRow(containerRow).height = Math.max(36, payload.containers.length * 20);
+  for (const col of ["B", "F"]) sheet.getCell(`${col}${containerRow}`).alignment = { wrapText: true, vertical: "middle", horizontal: "left" };
+  const totalRow = containerRow + 1;
+  const display = (value, unit) => value === null ? `TBC ${unit}` : `${new Intl.NumberFormat("en-US", { maximumFractionDigits: 3 }).format(value)} ${unit}`;
+  setWorkbookCell(sheet, `F${totalRow}`, display(payload.totals.packages, "PACKAGES"));
+  setWorkbookCell(sheet, `G${totalRow}`, display(payload.totals.gross_weight, "KGS"));
+  setWorkbookCell(sheet, `H${totalRow}`, display(payload.totals.cbm, "CBM"));
+  for (const col of ["F", "G", "H"]) sheet.getCell(`${col}${totalRow}`).alignment = { wrapText: true, vertical: "middle", horizontal: "center" };
+  const notes = ["HS Codes for reference only; do not print on the Bill of Lading."];
+  if (siFieldValue(data, "booking_no")) notes.push(`BOOKING NO.: ${siFieldValue(data, "booking_no")}`);
+  if (draft) notes.push("DRAFT: TBC fields must be confirmed before submission.");
+  setWorkbookCell(sheet, `B${totalRow + 1}`, notes.join("\n"));
+  sheet.getCell(`B${totalRow + 1}`).alignment = { horizontal: "left", vertical: "middle", wrapText: true };
+  const blob = new Blob([await workbook.xlsx.writeBuffer()], { type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" });
+  const url = URL.createObjectURL(blob);
+  const anchor = document.createElement("a");
+  anchor.href = url;
+  const reference = String(siFieldValue(data, "booking_no") || siFieldValue(data, "bill_of_lading_no") || data.case?.case_no || "SI").replace(/[\\/:*?"<>|]/g, "_");
+  anchor.download = `${reference} SI${draft ? " DRAFT" : ""}.xlsx`;
+  anchor.click();
+  window.setTimeout(() => URL.revokeObjectURL(url), 1000);
+  return anchor.download;
+}
+
 function setStatus(text) {
   qs("serverStatus").textContent = text;
 }
@@ -2558,6 +2750,8 @@ function renderSiFields() {
   grid.querySelectorAll("[data-field]").forEach((input) => {
     input.addEventListener("input", (event) => {
       setField(event.target.dataset.field, event.target.value);
+      const key = { total_packages: "packages", gross_weight: "gross_weight", cbm: "cbm" }[event.target.dataset.field];
+      if (key) state.current.si_total_overrides = { ...(state.current.si_total_overrides || {}), [key]: true };
       markDirty();
       renderSummary();
     });
@@ -3034,7 +3228,7 @@ function renderGroups() {
           </div>
           <div class="group-meta">
             <span>PIPKG待核验</span>
-            <span>SI模板未配置</span>
+            <span>SI 可导出</span>
             ${hasContainerData ? `<span>柜子数：${containers.length}</span>` : ""}
             ${hasItemData ? `<span>商品数：${itemCount}</span>` : ""}
             ${hasPackingData ? `<span>包装行：${packingCount}</span>` : ""}
@@ -3336,6 +3530,9 @@ function mapDraftItem(item) {
     calculation_breakdown: item.calculation_breakdown || [],
     evidence: item.evidence || [],
     hs_code_reference: cloneJson(item.hs_code_reference || {}),
+    hs_codes: cloneJson(item.hs_codes || {}),
+    hs_code_legacy_scope: item.hs_code_legacy_scope || "unspecified",
+    hs_code_list: cloneJson(item.hs_code_list || []),
   };
 }
 
@@ -3376,6 +3573,10 @@ function mapDraftPackingLine(line) {
     quantity_calculation_method: line.quantity_calculation_method || "",
     calculation_breakdown: line.calculation_breakdown || [],
     evidence: line.evidence || [],
+    hs_code_reference: cloneJson(line.hs_code_reference || {}),
+    hs_codes: cloneJson(line.hs_codes || {}),
+    hs_code_legacy_scope: line.hs_code_legacy_scope || "unspecified",
+    hs_code_list: cloneJson(line.hs_code_list || []),
   };
 }
 
@@ -3521,6 +3722,11 @@ function syncCurrentGroup() {
     if (sealNo) group.si.containers[0].seal_no = valueFromDraftField(sealNo);
   }
   if (vesselVoyage) group.si.vessel_voyage = vesselVoyage;
+  siFields.forEach((name) => {
+    const value = currentFieldCopy(name);
+    if (value) group.si[name] = value;
+  });
+  group.si_total_overrides = cloneJson(state.current.si_total_overrides || {});
 
   group.items = mergeCurrentItems(group.items || [], state.current.items || []);
   group.packing_lines = mergeCurrentPackingLines(group.packing_lines || [], state.current.packing_lines || []);
@@ -3548,6 +3754,7 @@ function buildEditableDraftPayload() {
   payload.case_no = state.current?.base_case_no || state.current?.case?.case_no || payload.case_no || "IMPORTED";
   payload.case = cloneJson(state.current?.case || {});
   payload.frontend_saved_at = new Date().toISOString();
+  payload.si_total_overrides = cloneJson(state.current.si_total_overrides || {});
   payload.frontend_save_version = 1;
   payload.last_active_group_id = state.current?.active_group_id || "";
   const shipmentType = state.current?.case?.shipment_type || "sea";
@@ -3625,6 +3832,7 @@ function applyShipmentGroup(group, index = 0) {
   state.activeGroupIndex = index;
   state.current.active_group_id = group.group_id || valueFromDraftField(group.bill_of_lading_no) || "";
   state.current.si = cloneJson(group.si || {});
+  state.current.si_total_overrides = cloneJson(group.si_total_overrides || {});
   const groupContainers = group.si?.containers || [];
   const mapped = {
     invoice_no: group.invoice_no,
@@ -3646,6 +3854,9 @@ function applyShipmentGroup(group, index = 0) {
     vessel_voyage: group.si?.vessel_voyage,
     si_template: group.si?.si_template || group.si?.carrier,
   };
+  siFields.forEach((name) => {
+    if (mapped[name] === undefined && group.si?.[name] !== undefined) mapped[name] = group.si[name];
+  });
   Object.entries(mapped).forEach(([key, field]) => {
     const value = valueFromDraftField(field);
     if (value !== undefined && value !== null && value !== "") {
@@ -3729,6 +3940,7 @@ function applyDraft(payload) {
     fedex_pricing: cloneJson(draft.fedex_pricing || { estimated_total_cap_usd: 80, contains_ai_estimates: false }),
     totals: cloneJson(draft.totals || {}),
     si: cloneJson(draft.si || {}),
+    si_total_overrides: cloneJson(draft.si_total_overrides || {}),
     frontend_totals_source: draft.frontend_totals_source || "",
   };
   Object.entries(draft.fields || {}).forEach(([key, field]) => {
@@ -4079,10 +4291,20 @@ async function exportByKind(kind) {
   qs("exportMenu").hidden = true;
   const mode = workflowType();
   if (kind === "si") {
-    qs("exportBox").innerHTML = `
-      <strong>SI 模板未配置</strong>
-      <span>当前只保留 SI 核验字段和柜号预分配入口；等船公司 SI 模板确认后再开放 SI Excel 导出。</span>
-    `;
+    const issues = siExportIssues(state.current);
+    if (issues.length && !(await confirmExportIssues(issues))) {
+      qs("exportBox").innerHTML = "<strong>已取消导出</strong><span>修改问题后可再次导出。</span>";
+      return;
+    }
+    setStatus("导出中");
+    try {
+      const filename = await exportSiInBrowser(state.current);
+      qs("exportBox").innerHTML = `<strong>${escapeHtml(filename)}</strong><span>SI 已在浏览器生成并下载；待确认内容标为 TBC。</span>`;
+      setStatus("已导出");
+    } catch (error) {
+      qs("exportBox").innerHTML = `<strong>SI 导出失败</strong><span>${escapeHtml(error.message)}</span>`;
+      setStatus("导出失败");
+    }
     return;
   }
   if (state.current.frontend_totals_source) syncEditableTotalsFromRows(state.current);
