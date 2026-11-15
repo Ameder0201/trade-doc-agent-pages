@@ -1527,19 +1527,6 @@ async function exportPipkgInBrowser(data) {
   setWorkbookCell(pkg, "C11", paymentText);
   clearWorkbookRows(pi, 19, 34, 1, 6);
   clearWorkbookRows(pkg, 15, 32, 1, 8);
-  for (let row = 19; row <= 37; row += 1) {
-    ["C", "D"].forEach((column) => {
-      const cell = pi.getCell(`${column}${row}`);
-      cell.style = { ...cell.style, numFmt: "General" };
-    });
-  }
-  for (let row = 15; row <= 33; row += 1) {
-    // Template cells may share style objects; keep number formats independent.
-    ["B", "C", "D", "E", "F", "G"].forEach((column) => {
-      const cell = pkg.getCell(`${column}${row}`);
-      cell.style = { ...cell.style, numFmt: ["B", "C", "D"].includes(column) ? "General" : "#,##0.00" };
-    });
-  }
   const items = (data.items || []).slice(0, 16);
   const hsLookup = hsCodeByItemDescription(data);
   let totalQuantity = 0;
@@ -1578,9 +1565,6 @@ async function exportPipkgInBrowser(data) {
     setWorkbookCell(pkg, `E${row}`, line.gross_weight === "" ? "" : values.E);
     setWorkbookCell(pkg, `F${row}`, line.net_weight === "" ? "" : values.F);
     setWorkbookCell(pkg, `G${row}`, line.cbm === "" ? "" : values.G);
-    ["E", "F", "G"].forEach((column) => {
-      pkg.getCell(`${column}${row}`).numFmt = "#,##0.00";
-    });
     Object.keys(packingTotals).forEach((column) => {
       packingTotals[column] += values[column];
     });
@@ -1590,8 +1574,20 @@ async function exportPipkgInBrowser(data) {
   pi.getCell("F37").numFmt = "#,##0.00";
   Object.entries(packingTotals).forEach(([column, result]) => {
     pkg.getCell(`${column}33`).value = { formula: `SUM(${column}15:${column}32)`, result };
-    if (["E", "F", "G"].includes(column)) pkg.getCell(`${column}33`).numFmt = "#,##0.00";
   });
+  // Apply last: template cells can share styles, including the total row.
+  for (let row = 19; row <= 37; row += 1) {
+    ["C", "D"].forEach((column) => {
+      const cell = pi.getCell(`${column}${row}`);
+      cell.style = { ...cell.style, numFmt: "General" };
+    });
+  }
+  for (let row = 15; row <= 33; row += 1) {
+    ["B", "C", "D", "E", "F", "G"].forEach((column) => {
+      const cell = pkg.getCell(`${column}${row}`);
+      cell.style = { ...cell.style, numFmt: ["B", "C", "D"].includes(column) ? "General" : "#,##0.00" };
+    });
+  }
   workbook.calcProperties.calcMode = "auto";
   workbook.calcProperties.fullCalcOnLoad = true;
   workbook.calcProperties.forceFullCalc = true;
