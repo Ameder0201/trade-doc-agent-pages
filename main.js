@@ -157,7 +157,6 @@ const coFields = [
   "co_marks",
   "total_packages",
   "co_package_unit",
-  "co_manufacturer_block",
   "co_certification_place_date",
   "co_declaration_place_date",
 ];
@@ -1079,7 +1078,6 @@ function validateInBrowser(data) {
       "co_transport_route",
       "destination_country",
       "total_packages",
-      "co_manufacturer_block",
     );
   }
   if (shipmentType === "bk" || data.document_type === "booking_order") {
@@ -1172,7 +1170,7 @@ function validateInBrowser(data) {
     add(
       "warning",
       `${key}_anomaly`,
-      `${anomalyLabels[key]}异常：装箱明细 ${result.detail_total_before} ${result.unit}，提单 ${result.bill_total} ${result.unit}，绝对差值 ${result.absolute_difference}，误差率 ${result.error_rate_percent.toFixed(4)}%；最终总计仍以提单为准`,
+      `${anomalyLabels[key]}异常：装箱明细 ${result.detail_total_before} ${result.unit}，提单 ${result.bill_total} ${result.unit}，绝对差值 ${result.absolute_difference}，误差率 ${result.error_rate_percent.toFixed(4)}%；请核对明细，Excel 合计按 SUM 计算`,
       `bl_totals.${key}`,
     );
   });
@@ -1446,7 +1444,7 @@ function sourceNumberFormat(display, fallbackDecimals = 3) {
 function itemNameWithHsCode(description, hsCode) {
   const name = String(description || "").trim();
   const code = String(hsCode || "").trim();
-  return [name, code ? `HSCODE:${code}` : ""].filter(Boolean).join(" ");
+  return [name, code ? `HSCODE:${code}` : ""].filter(Boolean).join("\n");
 }
 
 function hsCodeByItemDescription(data) {
@@ -1529,6 +1527,19 @@ async function exportPipkgInBrowser(data) {
   setWorkbookCell(pkg, "C11", paymentText);
   clearWorkbookRows(pi, 19, 34, 1, 6);
   clearWorkbookRows(pkg, 15, 32, 1, 8);
+  for (let row = 19; row <= 37; row += 1) {
+    ["C", "D"].forEach((column) => {
+      const cell = pi.getCell(`${column}${row}`);
+      cell.style = { ...cell.style, numFmt: "General" };
+    });
+  }
+  for (let row = 15; row <= 33; row += 1) {
+    // Template cells may share style objects; keep number formats independent.
+    ["B", "C", "D", "E", "F", "G"].forEach((column) => {
+      const cell = pkg.getCell(`${column}${row}`);
+      cell.style = { ...cell.style, numFmt: ["B", "C", "D"].includes(column) ? "General" : "#,##0.00" };
+    });
+  }
   const items = (data.items || []).slice(0, 16);
   const hsLookup = hsCodeByItemDescription(data);
   let totalQuantity = 0;
@@ -1567,7 +1578,9 @@ async function exportPipkgInBrowser(data) {
     setWorkbookCell(pkg, `E${row}`, line.gross_weight === "" ? "" : values.E);
     setWorkbookCell(pkg, `F${row}`, line.net_weight === "" ? "" : values.F);
     setWorkbookCell(pkg, `G${row}`, line.cbm === "" ? "" : values.G);
-    pkg.getCell(`G${row}`).numFmt = "#,##0.00";
+    ["E", "F", "G"].forEach((column) => {
+      pkg.getCell(`${column}${row}`).numFmt = "#,##0.00";
+    });
     Object.keys(packingTotals).forEach((column) => {
       packingTotals[column] += values[column];
     });
@@ -1575,18 +1588,9 @@ async function exportPipkgInBrowser(data) {
   pi.getCell("C37").value = { formula: "SUM(C19:C34)", result: totalQuantity };
   pi.getCell("F37").value = { formula: "SUM(F19:F34)", result: totalAmount };
   pi.getCell("F37").numFmt = "#,##0.00";
-  const blGrossWeight = sourceTotalForExport(data, "gross_weight");
-  const blCbm = sourceTotalForExport(data, "cbm");
   Object.entries(packingTotals).forEach(([column, result]) => {
-    const sourceValue = column === "E" ? blGrossWeight : column === "G" && blCbm !== undefined ? roundCbmNumber(blCbm) : null;
-    if (sourceValue !== null && sourceValue !== undefined) {
-      setWorkbookCell(pkg, `${column}33`, sourceValue);
-      const key = column === "E" ? "gross_weight" : "cbm";
-      pkg.getCell(`${column}33`).numFmt = key === "cbm" ? "#,##0.00" : sourceNumberFormat(data.bl_totals?.[`${key}_display`]);
-      return;
-    }
     pkg.getCell(`${column}33`).value = { formula: `SUM(${column}15:${column}32)`, result };
-    if (column === "G") pkg.getCell(`${column}33`).numFmt = "#,##0.00";
+    if (["E", "F", "G"].includes(column)) pkg.getCell(`${column}33`).numFmt = "#,##0.00";
   });
   workbook.calcProperties.calcMode = "auto";
   workbook.calcProperties.fullCalcOnLoad = true;
@@ -1809,9 +1813,6 @@ function coDescriptionBlock(data) {
     ...descriptions,
     "",
     packageLine,
-    "",
-    "MANUFACTURER:",
-    fieldValue(data, "co_manufacturer_block", coDefaults.manufacturer),
   ].join("\n");
 }
 
@@ -2406,7 +2407,6 @@ function ensureCoDefaultFields() {
     co_marks: "N/M",
     total_packages: (state.current.packing_lines || []).reduce((sum, line) => sum + Number(line.packages || 0), 0) || 1,
     co_package_unit: "PACKAGE",
-    co_manufacturer_block: getField("shipper_block") || coDefaults.manufacturer,
     co_certification_place_date: ["SHENZHEN CHINA", getField("invoice_date")].filter(Boolean).join("\n"),
     co_declaration_place_date: ["SHENZHEN CHINA", getField("invoice_date")].filter(Boolean).join("\n"),
   };
@@ -2414,7 +2414,7 @@ function ensureCoDefaultFields() {
     if (getField(name) !== "" && getField(name) !== null && getField(name) !== undefined) return;
     state.current.fields[name] = {
       value,
-      confidence: name === "co_exporter_block" || name === "co_manufacturer_block" ? "high" : "medium",
+      confidence: name === "co_exporter_block" ? "high" : "medium",
       evidence: [{ file: "co_default_rule", locator: name, text: "CO 模板默认值，可人工修改" }],
     };
   });
