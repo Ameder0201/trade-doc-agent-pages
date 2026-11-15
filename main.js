@@ -1575,6 +1575,7 @@ async function exportPipkgInBrowser(data) {
   Object.entries(packingTotals).forEach(([column, result]) => {
     pkg.getCell(`${column}33`).value = { formula: `SUM(${column}15:${column}32)`, result };
   });
+  setWorkbookCell(pkg, "C33", "");
   // Apply last: template cells can share styles, including the total row.
   for (let row = 19; row <= 37; row += 1) {
     ["C", "D"].forEach((column) => {
